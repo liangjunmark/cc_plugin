@@ -37,8 +37,12 @@ def is_replay_safe(body: dict[str, Any]) -> tuple[bool, str | None]:
     latest_user_index = _latest_user_index(messages)
     if latest_user_index is None:
         return False, "latest_user_missing"
-    if any(message.get("role") == "assistant" for message in messages[latest_user_index + 1 :] if isinstance(message, dict)):
-        return False, "assistant_state_present"
+    for message in messages[latest_user_index + 1 :]:
+        if not isinstance(message, dict):
+            return False, "unknown_state_present"
+        if message.get("role") == "assistant":
+            return False, "assistant_state_present"
+        return False, "unknown_state_present"
     for message in messages[: latest_user_index + 1]:
         if not isinstance(message, dict):
             return False, "unknown_state_present"

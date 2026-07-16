@@ -31,6 +31,29 @@ def test_replay_safe_rejects_assistant_continuation_after_latest_user() -> None:
     assert reason == "assistant_state_present"
 
 
+def test_replay_safe_rejects_unknown_tail_state_after_latest_user() -> None:
+    body = {"messages": [{"role": "user", "content": "Question"}, "opaque-tail-state"]}
+
+    replay_safe, reason = is_replay_safe(body)
+
+    assert replay_safe is False
+    assert reason == "unknown_state_present"
+
+
+def test_replay_safe_rejects_unknown_role_tail_state_after_latest_user() -> None:
+    body = {
+        "messages": [
+            {"role": "user", "content": "Question"},
+            {"role": "system_tool", "content": "opaque"},
+        ],
+    }
+
+    replay_safe, reason = is_replay_safe(body)
+
+    assert replay_safe is False
+    assert reason == "unknown_state_present"
+
+
 def test_replay_safe_rejects_execution_intent_case_insensitively() -> None:
     body = {"messages": [{"role": "user", "content": "Run this command now: rm -rf tmp"}]}
 
