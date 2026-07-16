@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from typing import Any
 
 import httpx
 
 from proxy.config import ProxyConfig
+from proxy.recorder import Recorder
 from proxy.schemas import RequestContext
 
 
@@ -37,13 +39,20 @@ class UpstreamResult:
     status_code: int
     headers: dict[str, str]
     body: bytes
+    response: httpx.Response | None = None
     streamed: bool = False
 
 
 class UpstreamTransport:
-    def __init__(self, client: httpx.AsyncClient, config: ProxyConfig) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        config: ProxyConfig,
+        recorder: Recorder | None = None,
+    ) -> None:
         self.client = client
         self.config = config
+        self.recorder = recorder
 
     async def send_once(
         self,
@@ -51,15 +60,16 @@ class UpstreamTransport:
         body: dict[str, Any],
         stream: bool,
     ) -> httpx.Response:
+        timeout = httpx.Timeout(
+            self.config.upstream.timeout_seconds,
+            connect=self.config.upstream.connect_timeout_seconds,
+        )
         request = self.client.build_request(
             "POST",
-            f"{self.config.upstream.base_url}/v1/messages",
+            _messages_url(self.config),
             headers=headers,
             json=body,
-            timeout=httpx.Timeout(
-                self.config.upstream.timeout_seconds,
-                connect=self.config.upstream.connect_timeout_seconds,
-            ),
+            timeout=timeout,
         )
         return await self.client.send(request, stream=stream)
 
@@ -74,13 +84,57 @@ class UpstreamTransport:
         budget = RetryBudget(self.config.upstream.max_retries)
 
         while True:
-            response = await self.send_once(headers, body, stream)
+            self._record(context, f"attempt-{context.attempt}-request", {"headers": headers, "body": body})
+            try:
+                response = await self.send_once(headers, body, stream)
+            except httpx.HTTPError as exc:
+                self._record(context, f"attempt-{context.attempt}-transport-error", {"error": str(exc)})
+                if replay_safe and budget.consume():
+                    context.attempt += 1
+                    continue
+                return UpstreamResult(
+                    status_code=599,
+                    headers={},
+                    body=str(exc).encode("utf-8"),
+                    streamed=False,
+                )
+
+            if replay_safe and response.status_code in self.config.upstream.retry_statuses and budget.consume():
+                self._record(
+                    context,
+                    f"attempt-{context.attempt}-response-meta",
+                    {"status_code": response.status_code, "headers": dict(response.headers), "retrying": True},
+                )
+                await response.aclose()
+                context.attempt += 1
+                continue
+
+            if stream and response.status_code < 400:
+                self._record(
+                    context,
+                    f"attempt-{context.attempt}-response-meta",
+                    {"status_code": response.status_code, "headers": dict(response.headers), "streamed": True},
+                )
+                return UpstreamResult(
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                    body=b"",
+                    response=response,
+                    streamed=True,
+                )
+
             content = await response.aread()
             result = UpstreamResult(
                 status_code=response.status_code,
                 headers=dict(response.headers),
                 body=content,
-                streamed=stream,
+                response=None,
+                streamed=False,
+            )
+            self._record(
+                context,
+                f"attempt-{context.attempt}-response",
+                {"status_code": result.status_code, "headers": result.headers, "body": _decode_body(content)},
             )
             await response.aclose()
 
@@ -93,6 +147,11 @@ class UpstreamTransport:
 
             context.attempt += 1
 
+    def _record(self, context: RequestContext, name: str, payload: dict[str, Any]) -> None:
+        if self.recorder is None:
+            return
+        self.recorder.write_artifact(context, name, payload)
+
 
 async def probe_stream_support(client: httpx.AsyncClient, config: ProxyConfig) -> bool:
     payload = {
@@ -101,5 +160,19 @@ async def probe_stream_support(client: httpx.AsyncClient, config: ProxyConfig) -
         "messages": [{"role": "user", "content": "reply with 1"}],
         "stream": True,
     }
-    response = await client.post(f"{config.upstream.base_url}/v1/messages", json=payload)
+    try:
+        response = await client.post(_messages_url(config), json=payload)
+    except httpx.HTTPError:
+        return False
     return response.status_code < 500
+
+
+def _messages_url(config: ProxyConfig) -> str:
+    return f"{config.upstream.base_url.rstrip('/')}/v1/messages"
+
+
+def _decode_body(content: bytes) -> Any:
+    try:
+        return json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return content.decode("utf-8", errors="replace")
