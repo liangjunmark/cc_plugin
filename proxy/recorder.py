@@ -15,6 +15,7 @@ ALWAYS_REDACT_FIELDS = {
     "set_cookie",
 }
 SECRET_FIELD_SUFFIXES = ("_token", "_secret", "_api_key", "_password", "_credential")
+GITHUB_PAT_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_")
 
 
 class Recorder:
@@ -66,6 +67,8 @@ def _redact_payload(payload: Any, whitelist: set[str]) -> Any:
         }
     if isinstance(payload, list):
         return [_redact_payload(item, whitelist) for item in payload]
+    if isinstance(payload, str) and _contains_github_pat(payload):
+        return "<redacted>"
     return payload
 
 
@@ -76,3 +79,8 @@ def _redact_value_for_key(key: str, value: Any, whitelist: set[str]) -> Any:
     if normalized in ALWAYS_REDACT_FIELDS or normalized.endswith(SECRET_FIELD_SUFFIXES):
         return "<redacted>"
     return _redact_payload(value, whitelist)
+
+
+def _contains_github_pat(value: str) -> bool:
+    lowered = value.lower()
+    return any(prefix in lowered for prefix in GITHUB_PAT_PREFIXES)

@@ -15,11 +15,11 @@ TRANSPORT_REGENERATED_HEADERS = {"host", "content-length"}
 SECRET_HEADER_FRAGMENTS = ("authorization", "api-key", "token", "secret")
 ALWAYS_REDACT_HEADERS = {
     "authorization",
-    "proxy-authorization",
-    "x-api-key",
-    "api-key",
+    "proxy_authorization",
+    "x_api_key",
+    "api_key",
     "cookie",
-    "set-cookie",
+    "set_cookie",
 }
 
 
@@ -35,9 +35,9 @@ def filter_forward_headers(headers: dict[str, str], safe_allowlist: set[str]) ->
 
 def redact_headers(headers: dict[str, str], safe_allowlist: set[str]) -> dict[str, str]:
     redacted: dict[str, str] = {}
-    allow = {name.lower() for name in safe_allowlist}
+    allow = {_canonicalize_header_name(name) for name in safe_allowlist}
     for name, value in headers.items():
-        lower = name.lower()
+        lower = _canonicalize_header_name(name)
         if lower in ALWAYS_REDACT_HEADERS or any(fragment in lower for fragment in SECRET_HEADER_FRAGMENTS):
             redacted[name] = "<redacted>"
         elif lower in allow:
@@ -49,3 +49,7 @@ def redact_headers(headers: dict[str, str], safe_allowlist: set[str]) -> dict[st
 
 def anthropic_error(status_code: int, message: str, error_type: str = "api_error") -> dict:
     return {"type": "error", "error": {"type": error_type, "message": message}, "status_code": status_code}
+
+
+def _canonicalize_header_name(name: str) -> str:
+    return name.strip().lower().replace("-", "_")

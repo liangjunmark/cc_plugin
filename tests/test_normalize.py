@@ -56,6 +56,14 @@ def test_redact_headers_never_whitelists_auth_headers() -> None:
     assert redacted["anthropic-version"] == "2023-06-01"
 
 
+def test_redact_headers_never_whitelists_underscore_auth_headers() -> None:
+    headers = {"X_API_KEY": "super-secret"}
+
+    redacted = redact_headers(headers, safe_allowlist={"x_api_key"})
+
+    assert redacted["X_API_KEY"] == "<redacted>"
+
+
 def test_recorder_redacts_sensitive_dict_payloads_by_default(tmp_path: Path, config: object) -> None:
     recorder = Recorder(tmp_path, config)
     context = RequestContext(request_id="req-1", attempt=1, log_dir=Path("req-1"))
@@ -74,6 +82,24 @@ def test_recorder_redacts_sensitive_dict_payloads_by_default(tmp_path: Path, con
     assert payload["authorization"] == "<redacted>"
     assert payload["csrf_token"] == "<redacted>"
     assert payload["keyboard"] == "safe"
+
+
+def test_recorder_redacts_github_pat_values_by_default(tmp_path: Path, config: object) -> None:
+    recorder = Recorder(tmp_path, config)
+    context = RequestContext(request_id="req-gh", attempt=1, log_dir=Path("req-gh"))
+
+    recorder.write_artifact(
+        context,
+        "payload",
+        {
+            "message": "github_pat_1234567890secret",
+            "nested": {"token": "ghp_1234567890secret"},
+        },
+    )
+
+    payload = json.loads((tmp_path / "req-gh" / "payload.json").read_text(encoding="utf-8"))
+    assert payload["message"] == "<redacted>"
+    assert payload["nested"]["token"] == "<redacted>"
 
 
 def test_recorder_blocks_raw_payload_logging_without_unsafe_override(
