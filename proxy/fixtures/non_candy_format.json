@@ -1,0 +1,6 @@
+{
+  "name": "non_candy_format",
+  "expected_answer": "7",
+  "exact_output_required": true,
+  "prompt": "计算 3+4。只输出最终数字，不要解释。"
+}

@@ -5,3 +5,4 @@ Task 2: complete (commits 5368379..31c5850, local audit after reviewer-driven fi
 Task 3: complete (commits 31c5850..7764545, local audit after reviewer-driven fixes)
 Task 4: complete (follow-up fixes on top of 3df7481, local audit after reviewer timeouts)
 Task 5: complete (FastAPI listener and streaming passthrough, local audit after reviewer timeout)
+Task 6: complete (evaluation helpers and seed fixtures, local audit)
