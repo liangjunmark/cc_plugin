@@ -7,6 +7,8 @@ from typing import Any
 
 from proxy.config import ProxyConfig
 
+STRICT_FORMAT_SUFFIX = "Return only the final answer when the user requests exact output."
+
 
 @dataclass(slots=True)
 class ClassificationResult:
@@ -138,10 +140,10 @@ def apply_rewrites(
         config.rewrite.strict_format_guardrail.enabled
         and any(pattern.search(surface) for pattern in _compile_patterns(config.classification.output_constraint_patterns))
     ):
-        rewritten["system"] = (
-            f"{rewritten.get('system', '')}\n"
-            "Return only the final answer when the user requests exact output."
-        ).strip()
+        rewritten["system"] = _append_system_suffix(
+            rewritten.get("system"),
+            STRICT_FORMAT_SUFFIX[: config.rewrite.strict_format_guardrail.max_suffix_chars],
+        )
         applied.append("strict_format_guardrail")
     return RewriteResult(body=rewritten, metadata={"applied_rules": applied})
 
@@ -192,3 +194,12 @@ def _flatten_content_block(block: dict[str, Any]) -> str | None:
 
 def _compile_patterns(patterns: list[str]) -> list[re.Pattern[str]]:
     return [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
+
+
+def _append_system_suffix(system: Any, suffix: str) -> Any:
+    if isinstance(system, list):
+        updated = deepcopy(system)
+        updated.append({"type": "text", "text": suffix})
+        return updated
+    base = "" if system is None else str(system)
+    return f"{base}\n{suffix}".strip()

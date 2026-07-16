@@ -123,6 +123,23 @@ def test_apply_rewrites_keeps_thinking_disabled_without_support(config) -> None:
     assert body == original
 
 
+def test_apply_rewrites_preserves_system_block_lists_and_suffix_limit(config) -> None:
+    config.rewrite.enabled = True
+    config.rewrite.strict_format_guardrail.max_suffix_chars = 20
+    body = {
+        "system": [{"type": "text", "text": "Original system"}],
+        "messages": [{"role": "user", "content": "只输出一个数字 21"}],
+        "max_tokens": 32,
+    }
+
+    result = apply_rewrites(body, config, capability_flags={"thinking": False})
+
+    assert isinstance(result.body["system"], list)
+    assert result.body["system"][0] == {"type": "text", "text": "Original system"}
+    assert result.body["system"][-1]["type"] == "text"
+    assert len(result.body["system"][-1]["text"]) <= 20
+
+
 def test_invalid_regex_config_fails_runtime_validation(tmp_path) -> None:
     from tests.test_config import valid_config_body, write_config
     from proxy.config import load_config, validate_runtime_config
