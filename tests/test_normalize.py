@@ -25,6 +25,20 @@ def test_filter_forward_headers_strips_hop_by_hop_and_transport_headers() -> Non
     assert forwarded["anthropic-version"] == "2023-06-01"
 
 
+def test_filter_forward_headers_strips_connection_nominated_headers() -> None:
+    headers = {
+        "Connection": "keep-alive, X-Internal-Auth",
+        "X-Internal-Auth": "spoofed",
+        "anthropic-version": "2023-06-01",
+    }
+
+    forwarded = filter_forward_headers(headers, safe_allowlist={"anthropic-version"})
+
+    assert "Connection" not in forwarded
+    assert "X-Internal-Auth" not in forwarded
+    assert forwarded["anthropic-version"] == "2023-06-01"
+
+
 def test_anthropic_error_envelope_shape() -> None:
     payload = anthropic_error(502, "upstream failed", "api_error")
     assert payload["type"] == "error"
@@ -62,6 +76,14 @@ def test_redact_headers_never_whitelists_underscore_auth_headers() -> None:
     redacted = redact_headers(headers, safe_allowlist={"x_api_key"})
 
     assert redacted["X_API_KEY"] == "<redacted>"
+
+
+def test_redact_headers_never_whitelists_api_key_variants() -> None:
+    headers = {"client-api-key": "super-secret"}
+
+    redacted = redact_headers(headers, safe_allowlist={"client-api-key"})
+
+    assert redacted["client-api-key"] == "<redacted>"
 
 
 def test_recorder_redacts_sensitive_dict_payloads_by_default(tmp_path: Path, config: object) -> None:
