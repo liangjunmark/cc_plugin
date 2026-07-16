@@ -30,3 +30,20 @@ def test_redact_headers_denies_unknown_headers_by_default() -> None:
     redacted = redact_headers(headers, safe_allowlist={"anthropic-version"})
     assert redacted["x-api-key"] == "<redacted>"
     assert redacted["anthropic-version"] == "2023-06-01"
+
+
+def test_redact_headers_never_whitelists_auth_headers() -> None:
+    headers = {
+        "Authorization": "Bearer secret",
+        "x-api-key": "super-secret",
+        "anthropic-version": "2023-06-01",
+    }
+
+    redacted = redact_headers(
+        headers,
+        safe_allowlist={"authorization", "x-api-key", "anthropic-version"},
+    )
+
+    assert redacted["Authorization"] == "<redacted>"
+    assert redacted["x-api-key"] == "<redacted>"
+    assert redacted["anthropic-version"] == "2023-06-01"
