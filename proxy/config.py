@@ -1,6 +1,7 @@
 import ipaddress
 import os
 from pathlib import Path
+import re
 from urllib.parse import urlparse
 import tomllib
 
@@ -105,6 +106,9 @@ def validate_runtime_config(config: ProxyConfig) -> None:
             raise ValueError(
                 "raw payload logging requires the unsafe override value YES_I_ACCEPT_RAW_LOGGING_RISK",
             )
+    _validate_regex_patterns(config.classification.reasoning_keyword_patterns)
+    _validate_regex_patterns(config.classification.output_constraint_patterns)
+    _validate_regex_patterns(config.classification.code_marker_patterns)
     validate_no_self_target(config)
 
 
@@ -154,3 +158,11 @@ def _is_loopback_host(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def _validate_regex_patterns(patterns: list[str]) -> None:
+    for pattern in patterns:
+        try:
+            re.compile(pattern, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(f"invalid regex pattern: {pattern}") from exc
