@@ -13,6 +13,10 @@ ALWAYS_REDACT_FIELDS = {
     "api_key",
     "cookie",
     "set_cookie",
+    "token",
+    "secret",
+    "password",
+    "credential",
 }
 SECRET_FIELD_SUFFIXES = ("_token", "_secret", "_api_key", "_password", "_credential")
 GITHUB_PAT_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_")

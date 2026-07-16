@@ -106,6 +106,28 @@ def test_recorder_redacts_sensitive_dict_payloads_by_default(tmp_path: Path, con
     assert payload["keyboard"] == "safe"
 
 
+def test_recorder_redacts_exact_secret_field_names(tmp_path: Path, config: object) -> None:
+    recorder = Recorder(tmp_path, config)
+    context = RequestContext(request_id="req-secret", attempt=1, log_dir=Path("req-secret"))
+
+    recorder.write_artifact(
+        context,
+        "payload",
+        {
+            "token": "token-value",
+            "secret": "secret-value",
+            "password": "password-value",
+            "credential": "credential-value",
+        },
+    )
+
+    payload = json.loads((tmp_path / "req-secret" / "payload.json").read_text(encoding="utf-8"))
+    assert payload["token"] == "<redacted>"
+    assert payload["secret"] == "<redacted>"
+    assert payload["password"] == "<redacted>"
+    assert payload["credential"] == "<redacted>"
+
+
 def test_recorder_redacts_github_pat_values_by_default(tmp_path: Path, config: object) -> None:
     recorder = Recorder(tmp_path, config)
     context = RequestContext(request_id="req-gh", attempt=1, log_dir=Path("req-gh"))
