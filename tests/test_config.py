@@ -148,3 +148,38 @@ def test_validate_no_self_target_rejects_default_ports(
 
     with pytest.raises(ValueError, match="must not target the local listener"):
         validate_no_self_target(config)
+
+
+@pytest.mark.parametrize(
+    ("server_host", "base_url"),
+    [
+        ("0.0.0.0", "http://127.0.0.1:8787"),
+        ("LOCALHOST", "http://localhost:8787"),
+    ],
+)
+def test_validate_no_self_target_rejects_equivalent_hosts(
+    server_host: str,
+    base_url: str,
+    tmp_path: Path,
+) -> None:
+    path = write_config(
+        tmp_path,
+        valid_config_body()
+        .replace('host = "127.0.0.1"', f'host = "{server_host}"', 1)
+        .replace('base_url = "https://example.com/anthropic"', f'base_url = "{base_url}"', 1),
+    )
+
+    config = load_config(path)
+
+    with pytest.raises(ValueError, match="must not target the local listener"):
+        validate_no_self_target(config)
+
+
+def test_validate_runtime_config_rejects_hostless_upstream_url(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        valid_config_body().replace('base_url = "https://example.com/anthropic"', 'base_url = "https://user@"', 1),
+    )
+
+    with pytest.raises(ValueError, match="hostname"):
+        validate_runtime_config(load_config(path))

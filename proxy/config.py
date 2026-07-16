@@ -1,3 +1,4 @@
+import ipaddress
 import os
 from pathlib import Path
 from urllib.parse import urlparse
@@ -94,8 +95,8 @@ def validate_runtime_config(config: ProxyConfig) -> None:
     if config.classification.rewrite_score_threshold < config.classification.normalize_only_score_threshold:
         raise ValueError("rewrite_score_threshold must be >= normalize_only_score_threshold")
     parsed = urlparse(config.upstream.base_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("upstream.base_url must be absolute http or https")
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+        raise ValueError("upstream.base_url must be an absolute http or https URL with a hostname")
     if any(code < 400 or code > 599 for code in config.upstream.retry_statuses):
         raise ValueError("retry_statuses must contain only 4xx or 5xx codes")
     if config.logging.allow_raw_payload_logging:
@@ -109,7 +110,11 @@ def validate_runtime_config(config: ProxyConfig) -> None:
 
 def validate_no_self_target(config: ProxyConfig) -> None:
     parsed = urlparse(config.upstream.base_url)
-    if not config.upstream.allow_self_target and _effective_port(parsed.scheme, parsed.port) == config.server.port and parsed.hostname == config.server.host:
+    if (
+        not config.upstream.allow_self_target
+        and _effective_port(parsed.scheme, parsed.port) == config.server.port
+        and _hosts_can_overlap(config.server.host, parsed.hostname)
+    ):
         raise ValueError("upstream.base_url must not target the local listener")
 
 
@@ -121,3 +126,31 @@ def _effective_port(scheme: str, port: int | None) -> int | None:
     if scheme == "https":
         return 443
     return None
+
+
+def _hosts_can_overlap(server_host: str, upstream_host: str) -> bool:
+    normalized_server = server_host.strip().lower()
+    normalized_upstream = upstream_host.strip().lower()
+    if normalized_server == normalized_upstream:
+        return True
+    if _is_unspecified_host(normalized_server) and _is_loopback_host(normalized_upstream):
+        return True
+    if _is_unspecified_host(normalized_upstream) and _is_loopback_host(normalized_server):
+        return True
+    return False
+
+
+def _is_unspecified_host(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_unspecified
+    except ValueError:
+        return False
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
