@@ -11,6 +11,12 @@ def write_config(tmp_path: Path, body: str) -> Path:
     return path
 
 
+def test_example_config_is_loadable() -> None:
+    config = load_config(Path("proxy/config.toml.example"))
+
+    validate_runtime_config(config)
+
+
 def test_load_config_accepts_valid_defaults(tmp_path: Path) -> None:
     path = write_config(
         tmp_path,
