@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from urllib.parse import urlparse
 import tomllib
@@ -97,6 +98,12 @@ def validate_runtime_config(config: ProxyConfig) -> None:
         raise ValueError("upstream.base_url must be absolute http or https")
     if any(code < 400 or code > 599 for code in config.upstream.retry_statuses):
         raise ValueError("retry_statuses must contain only 4xx or 5xx codes")
+    if config.logging.allow_raw_payload_logging:
+        override_value = os.environ.get(config.logging.unsafe_override_via_env)
+        if override_value != "YES_I_ACCEPT_RAW_LOGGING_RISK":
+            raise ValueError(
+                "raw payload logging requires the unsafe override value YES_I_ACCEPT_RAW_LOGGING_RISK",
+            )
 
 
 def validate_no_self_target(config: ProxyConfig) -> None:
