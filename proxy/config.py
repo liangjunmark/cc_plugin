@@ -104,9 +104,20 @@ def validate_runtime_config(config: ProxyConfig) -> None:
             raise ValueError(
                 "raw payload logging requires the unsafe override value YES_I_ACCEPT_RAW_LOGGING_RISK",
             )
+    validate_no_self_target(config)
 
 
 def validate_no_self_target(config: ProxyConfig) -> None:
     parsed = urlparse(config.upstream.base_url)
-    if not config.upstream.allow_self_target and parsed.hostname == config.server.host and parsed.port == config.server.port:
+    if not config.upstream.allow_self_target and _effective_port(parsed.scheme, parsed.port) == config.server.port and parsed.hostname == config.server.host:
         raise ValueError("upstream.base_url must not target the local listener")
+
+
+def _effective_port(scheme: str, port: int | None) -> int | None:
+    if port is not None:
+        return port
+    if scheme == "http":
+        return 80
+    if scheme == "https":
+        return 443
+    return None

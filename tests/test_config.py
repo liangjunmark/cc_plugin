@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from proxy.config import load_config, validate_runtime_config
+from proxy.config import load_config, validate_no_self_target, validate_runtime_config
 
 
 def write_config(tmp_path: Path, body: str) -> Path:
@@ -121,3 +121,30 @@ def test_invalid_threshold_band_is_rejected(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="rewrite_score_threshold"):
         validate_runtime_config(load_config(path))
+
+
+@pytest.mark.parametrize(
+    ("base_url", "server_port"),
+    [
+        ("http://127.0.0.1", 80),
+        ("https://127.0.0.1", 443),
+    ],
+)
+def test_validate_no_self_target_rejects_default_ports(
+    base_url: str,
+    server_port: int,
+    tmp_path: Path,
+) -> None:
+    path = write_config(
+        tmp_path,
+        valid_config_body()
+        .replace('host = "127.0.0.1"', 'host = "127.0.0.1"', 1)
+        .replace('port = 8787', f"port = {server_port}", 1)
+        .replace('base_url = "https://example.com/anthropic"', f'base_url = "{base_url}"', 1)
+        .replace("allow_self_target = false", "allow_self_target = false", 1),
+    )
+
+    config = load_config(path)
+
+    with pytest.raises(ValueError, match="must not target the local listener"):
+        validate_no_self_target(config)
