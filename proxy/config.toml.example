@@ -1,3 +1,6 @@
+# Set CC_PROXY_CONFIG to point at this file or a local copy when using
+# `uvicorn proxy.app:create_app --factory`.
+
 [server]
 host = "127.0.0.1"
 port = 8787

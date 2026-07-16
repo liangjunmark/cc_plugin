@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import json
+import os
 from pathlib import Path
 from typing import Any, AsyncIterator
 from uuid import uuid4
@@ -10,7 +11,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from proxy.config import ProxyConfig
+from proxy.config import ProxyConfig, load_config, validate_runtime_config
 from proxy.normalize import anthropic_error, filter_forward_headers
 from proxy.recorder import Recorder
 from proxy.rewrite import apply_rewrites, classify_request
@@ -19,13 +20,14 @@ from proxy.upstream import CapabilityCache, UpstreamResult, UpstreamTransport, p
 
 
 def create_app(
-    config: ProxyConfig,
+    config: ProxyConfig | None = None,
     transport: UpstreamTransport | Any | None = None,
     recorder: Recorder | None = None,
     capability_cache: CapabilityCache | None = None,
 ) -> FastAPI:
+    active_config = config or _load_default_config()
     state: dict[str, Any] = {
-        "config": config,
+        "config": active_config,
         "transport": transport,
         "recorder": recorder,
         "capability_cache": capability_cache or CapabilityCache(),
@@ -38,11 +40,11 @@ def create_app(
         if state["transport"] is None:
             client = httpx.AsyncClient()
             state["http_client"] = client
-            active_recorder = state["recorder"] or Recorder(Path(config.server.request_log_dir), config)
+            active_recorder = state["recorder"] or Recorder(Path(active_config.server.request_log_dir), active_config)
             state["recorder"] = active_recorder
-            state["transport"] = UpstreamTransport(client, config, active_recorder)
-            if config.upstream.stream_probe_on_startup:
-                state["stream_probe_supported"] = await probe_stream_support(client, config)
+            state["transport"] = UpstreamTransport(client, active_config, active_recorder)
+            if active_config.upstream.stream_probe_on_startup:
+                state["stream_probe_supported"] = await probe_stream_support(client, active_config)
         try:
             yield
         finally:
@@ -61,7 +63,7 @@ def create_app(
         return {
             "status": "ready",
             "stream_probe": {
-                "enabled": config.upstream.stream_probe_on_startup,
+                "enabled": active_config.upstream.stream_probe_on_startup,
                 "supported": state["stream_probe_supported"],
             },
         }
@@ -70,14 +72,14 @@ def create_app(
     async def messages(payload: dict[str, Any], request: Request):
         request_id = request.headers.get("x-request-id", str(uuid4()))
         forward_headers = filter_forward_headers(dict(request.headers), set())
-        classification = classify_request(payload, config)
+        classification = classify_request(payload, active_config)
         outgoing_body = payload
-        if config.rewrite.enabled and classification.route == "rewrite":
+        if active_config.rewrite.enabled and classification.route == "rewrite":
             rewrite_result = apply_rewrites(
                 outgoing_body,
-                config,
+                active_config,
                 capability_flags={
-                    "thinking": state["capability_cache"].is_supported(config.upstream.base_url, "thinking"),
+                    "thinking": state["capability_cache"].is_supported(active_config.upstream.base_url, "thinking"),
                 },
             )
             outgoing_body = rewrite_result.body
@@ -134,3 +136,10 @@ def _parse_upstream_json(upstream: UpstreamResult) -> dict[str, Any]:
     if isinstance(parsed, dict):
         return parsed
     return anthropic_error(upstream.status_code, "upstream returned a non-object JSON payload")
+
+
+def _load_default_config() -> ProxyConfig:
+    config_path = Path(os.environ.get("CC_PROXY_CONFIG", "proxy/config.toml.example"))
+    config = load_config(config_path)
+    validate_runtime_config(config)
+    return config

@@ -45,6 +45,22 @@ def test_health_endpoint_returns_ok(config) -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_proxy_startup_smoke(config) -> None:
+    from proxy.app import create_app
+
+    app = create_app(config)
+
+    assert app is not None
+
+
+def test_factory_create_app_uses_default_example_config() -> None:
+    from proxy.app import create_app
+
+    app = create_app()
+
+    assert app is not None
+
+
 def test_ready_endpoint_reports_probe_state(config) -> None:
     from proxy.app import create_app
 
