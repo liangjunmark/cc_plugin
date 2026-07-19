@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 from proxy.config import ProxyConfig
 from proxy.phase2b_extract import extract_attack_record, extract_audit_record, extract_branch_record
-from proxy.rewrite import ClassificationResult
+from proxy.rewrite import ClassificationResult, extract_effective_prompt_surface
 from proxy.schemas import Phase2bBranchDecision, Phase2bExecutionResult, Phase2bExtractedRecord, RequestContext
 from proxy.upstream import CallBudget, UpstreamResult, UpstreamTransport
 
@@ -32,6 +32,7 @@ def is_phase2b_eligible(
     config: ProxyConfig,
 ) -> bool:
     surface = classification.effective_prompt_surface
+    prepared_surface = extract_effective_prompt_surface(body)
     latest_user_text = _latest_user_text(body)
     return (
         config.phase2b.enabled
@@ -42,12 +43,33 @@ def is_phase2b_eligible(
         and body.get("tool_choice") in (None, "auto")
         and _is_single_turn_user_request(body)
         and bool(latest_user_text)
-        and _matches_non_negated_patterns(surface, config.classification.output_constraint_patterns)
+        and (
+            _matches_non_negated_patterns(surface, config.classification.output_constraint_patterns)
+            or _matches_non_negated_patterns(prepared_surface, config.classification.output_constraint_patterns)
+        )
         and not _requests_explanatory_output(surface)
-        and not _requests_structured_output_format(surface)
+        and not _requests_structured_output_format(prepared_surface)
         and not _matches_patterns(surface, config.classification.code_marker_patterns)
         and _is_stable_phase2b_prompt_family(surface, config)
     )
+
+
+def prepare_phase2b_body(
+    body: dict[str, Any],
+    classification: ClassificationResult,
+    config: ProxyConfig,
+) -> dict[str, Any]:
+    request = deepcopy(body)
+    request["stream"] = False
+    surface = extract_effective_prompt_surface(request)
+    if (
+        config.phase2b.require_exact_output_requests
+        and _is_stable_phase2b_prompt_family(surface, config)
+        and not _matches_non_negated_patterns(surface, config.classification.output_constraint_patterns)
+        and not _requests_structured_output_format(surface)
+    ):
+        _append_exact_output_to_latest_user_message(request)
+    return request
 
 
 def build_constraint_ledger(surface: str) -> list[str]:
@@ -62,6 +84,22 @@ def build_constraint_ledger(surface: str) -> list[str]:
     if "苹果" in surface or "apple" in lowered:
         ledger.append("success condition requires apple and peach across opposite shapes")
     return ledger
+
+
+def _append_exact_output_to_latest_user_message(body: dict[str, Any]) -> None:
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            if "只输出" in content or "only output" in content.lower():
+                return
+            message["content"] = f"{content}\n只输出最终答案。"
+        return
 
 
 def build_branch_prompt(body: dict[str, Any], branch_family: str) -> dict[str, Any]:

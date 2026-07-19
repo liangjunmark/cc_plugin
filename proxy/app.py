@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from contextlib import asynccontextmanager
 import json
 import os
@@ -16,7 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from proxy.config import ProxyConfig, load_config, validate_runtime_config
 from proxy.normalize import anthropic_error, filter_forward_headers
 from proxy.phase2 import is_phase2_eligible, run_phase2
-from proxy.phase2b import is_phase2b_eligible, run_phase2b
+from proxy.phase2b import is_phase2b_eligible, prepare_phase2b_body, run_phase2b
 from proxy.recorder import Recorder
 from proxy.rewrite import apply_rewrites, classify_request
 from proxy.schemas import RequestContext
@@ -109,7 +108,7 @@ def create_app(
             outgoing_body = rewrite_result.body
 
         streamed_request = bool(outgoing_body.get("stream"))
-        phase2b_body = outgoing_body if not streamed_request else _non_stream_copy(outgoing_body)
+        phase2b_body = prepare_phase2b_body(outgoing_body, classification, active_config)
         should_run_phase2b = False
         if phase_selector == "phase2b":
             should_run_phase2b = is_phase2b_eligible(phase2b_body, classification, active_config)
@@ -292,12 +291,6 @@ def _usage_output_tokens(payload: dict[str, Any]) -> int:
 
 def _encode_sse_event(event: str, data: dict[str, Any]) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n".encode("utf-8")
-
-
-def _non_stream_copy(body: dict[str, Any]) -> dict[str, Any]:
-    copied = deepcopy(body)
-    copied["stream"] = False
-    return copied
 
 
 def _stream_media_type(headers: dict[str, str]) -> str:
