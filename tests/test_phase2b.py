@@ -150,7 +150,6 @@ async def test_run_phase2b_uses_configured_boundary_verifier_fast_path_when_it_r
 
     phase2b_config = _phase2b_config_with_boundary_verifier(config)
     transport = StubTransport([
-        _message("14"),
         _message("N20_FAILS: YES\nN21_FAILS: NO\nFINAL_ANSWER: 21"),
     ])
 
@@ -166,7 +165,30 @@ async def test_run_phase2b_uses_configured_boundary_verifier_fast_path_when_it_r
     assert result.mode == "phase2b"
     assert result.branch_decisions == []
     assert result.downstream_payload["content"] == [{"type": "text", "text": "21"}]
-    assert len(transport.requests) == 2
+    assert len(transport.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_phase2b_prioritizes_boundary_verifier_before_baseline_for_candy_fast_path(config) -> None:
+    from proxy.phase2b import run_phase2b
+
+    phase2b_config = _phase2b_config_with_boundary_verifier(config)
+    transport = StubTransport([
+        _message("N20_FAILS: YES\nN21_FAILS: NO\nFINAL_ANSWER: 21"),
+    ])
+
+    result = await run_phase2b(
+        transport=transport,
+        headers={},
+        body=_phase2b_body(),
+        classification=_candy_boundary_classification(),
+        config=phase2b_config,
+        request_id="req-boundary-before-baseline",
+    )
+
+    assert result.mode == "phase2b"
+    assert result.downstream_payload["content"] == [{"type": "text", "text": "21"}]
+    assert len(transport.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -175,9 +197,8 @@ async def test_run_phase2b_uses_boundary_verifier_fast_path_with_brief_explanati
 
     phase2b_config = _phase2b_config_with_boundary_verifier(config)
     transport = StubTransport([
-        _message("14"),
         _message("N20_FAILS: YES\nN21_FAILS: NO\nFINAL_ANSWER: 21"),
-        _message("因为 20 仍可构造失败，而 21 已能保证成功，所以最少取 21 个。"),
+        _message("先按题目允许的可控形状来分析最坏情况。20 个时仍能安排出未满足条件的取法，而到 21 个时这种失败安排被排除，所以答案是 21。"),
     ])
     body = {
         "model": "m",
@@ -213,9 +234,113 @@ async def test_run_phase2b_uses_boundary_verifier_fast_path_with_brief_explanati
 
     assert result.mode == "phase2b"
     assert result.downstream_payload["content"] == [
-        {"type": "text", "text": "因为 20 仍可构造失败，而 21 已能保证成功，所以最少取 21 个。"}
+        {
+            "type": "text",
+            "text": "先按题目允许的可控形状来分析最坏情况。20 个时仍能安排出未满足条件的取法，而到 21 个时这种失败安排被排除，所以答案是 21。",
+        }
     ]
-    assert len(transport.requests) == 3
+    assert len(transport.requests) == 2
+    assert "confirmed answer" in str(transport.requests[1]["body"]).lower()
+
+
+@pytest.mark.asyncio
+async def test_run_phase2b_uses_boundary_verifier_fast_path_for_candy_question_without_extra_explanation(config) -> None:
+    from proxy.phase2b import run_phase2b
+
+    phase2b_config = _phase2b_config_with_boundary_verifier(config)
+    transport = StubTransport([
+        _message("N20_FAILS: YES\nN21_FAILS: NO\nFINAL_ANSWER: 21"),
+        _message("先固定题目允许控制的形状选择，再看最坏情况。20 个时还保留失败空间，21 个时失败空间被封住，因此最少需要 21 个。"),
+    ])
+    body = {
+        "model": "m",
+        "max_tokens": 4096,
+        "stream": False,
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。"
+                    "现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果"
+                    "才能保证手中同时拥有不同形状的苹果味和桃子味的糖？"
+                    "苹果味 桃子味 西瓜味\n"
+                    "圆形 7 9 8\n"
+                    "五角星形 7 6 4"
+                ),
+            }
+        ],
+    }
+    classification = ClassificationResult(
+        "rewrite",
+        5,
+        True,
+        None,
+        "在一个黑色的袋子里 形状靠手感可以分辨 苹果味 桃子味 西瓜味 圆形 7 9 8 五角星形 7 6 4 最少",
+    )
+
+    result = await run_phase2b(
+        transport=transport,
+        headers={},
+        body=body,
+        classification=classification,
+        config=phase2b_config,
+        request_id="req-boundary-fast-path-candy",
+    )
+
+    assert result.mode == "phase2b"
+    assert result.downstream_payload["content"] == [
+        {
+            "type": "text",
+            "text": "先固定题目允许控制的形状选择，再看最坏情况。20 个时还保留失败空间，21 个时失败空间被封住，因此最少需要 21 个。",
+        }
+    ]
+    assert len(transport.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_run_phase2b_falls_back_to_answer_only_when_boundary_explanation_generation_is_invalid(config) -> None:
+    from proxy.phase2b import run_phase2b
+
+    phase2b_config = _phase2b_config_with_boundary_verifier(config)
+    transport = StubTransport([
+        _message("N20_FAILS: YES\nN21_FAILS: NO\nFINAL_ANSWER: 21"),
+        _message("I cannot determine that."),
+    ])
+    body = {
+        "model": "m",
+        "max_tokens": 4096,
+        "stream": False,
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。"
+                    "现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果"
+                    "才能保证手中同时拥有不同形状的苹果味和桃子味的糖？请简要说明关键理由，并给出最终答案。"
+                ),
+            }
+        ],
+    }
+    classification = ClassificationResult(
+        "rewrite",
+        5,
+        True,
+        None,
+        "在一个黑色的袋子里 形状靠手感可以分辨 苹果味 桃子味 西瓜味 圆形 7 9 8 五角星形 7 6 4 最少 请简要说明关键理由并给出最终答案",
+    )
+
+    result = await run_phase2b(
+        transport=transport,
+        headers={},
+        body=body,
+        classification=classification,
+        config=phase2b_config,
+        request_id="req-boundary-explanation-fallback",
+    )
+
+    assert result.mode == "phase2b"
+    assert result.downstream_payload["content"] == [{"type": "text", "text": "21"}]
+    assert len(transport.requests) == 2
 
 
 @pytest.mark.asyncio
@@ -366,8 +491,8 @@ async def test_run_phase2b_falls_through_when_configured_boundary_verifier_text_
     ]
     phase2b_config.phase2b.max_total_upstream_calls = 14
     transport = StubTransport([
-        _message("14"),
         _message("I am not sure."),
+        _message("14"),
         _message('{"candidate_answer":"21"}'),
         _message("bad branch"),
         _message("bad branch"),
@@ -449,8 +574,8 @@ async def test_run_phase2b_falls_through_when_boundary_verifier_verdicts_contrad
     ]
     phase2b_config.phase2b.max_total_upstream_calls = 14
     transport = StubTransport([
-        _message("14"),
         _message("N20_FAILS: NO\nN21_FAILS: YES\nFINAL_ANSWER: 21"),
+        _message("14"),
         _message('{"candidate_answer":"21"}'),
         _message("bad branch"),
         _message("bad branch"),
@@ -484,7 +609,6 @@ async def test_run_phase2b_uses_configured_boundary_verifier_bounds_and_markers(
     phase2b_config.phase2b.boundary_verifier.trigger_markers = ["marker-a", "marker-b"]
     phase2b_config.phase2b.max_total_upstream_calls = 14
     transport = StubTransport([
-        _message("14"),
         _message("N10_FAILS: YES\nN11_FAILS: NO\nFINAL_ANSWER: 11"),
     ])
     classification = ClassificationResult("rewrite", 5, True, None, "marker-a marker-b 最少 只输出")
@@ -500,7 +624,7 @@ async def test_run_phase2b_uses_configured_boundary_verifier_bounds_and_markers(
 
     assert result.mode == "phase2b"
     assert result.downstream_payload["content"] == [{"type": "text", "text": "11"}]
-    boundary_request = transport.requests[1]["body"]["messages"][0]["content"]
+    boundary_request = transport.requests[0]["body"]["messages"][0]["content"]
     assert "10 和 11" in boundary_request
 
 

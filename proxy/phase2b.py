@@ -175,6 +175,35 @@ def build_boundary_verifier_prompt(
     return request
 
 
+def build_boundary_explanation_prompt(
+    body: dict[str, Any],
+    lower_bound: int,
+    upper_bound: int,
+    candidate_answer: str,
+) -> dict[str, Any]:
+    request = deepcopy(body)
+    request["stream"] = False
+    request["system"] = (
+        "You are an internal explanation synthesizer. The final answer is already fixed."
+        " Do not re-solve the problem, do not change the answer, and do not mention internal tools or boundary-verifier labels."
+        " Write a brief user-facing explanation in the same language as the original task."
+        " Keep it to 2-4 sentences and end by clearly stating the confirmed final answer."
+    )
+    request["messages"] = [{
+        "role": "user",
+        "content": (
+            "Original task:\n"
+            f"{_latest_user_text(body)}\n\n"
+            "Confirmed boundary findings:\n"
+            f"- {lower_bound} can still fail in a worst-case construction.\n"
+            f"- {upper_bound} no longer fails.\n\n"
+            f"Confirmed answer: {candidate_answer}\n\n"
+            "Write the final explanation only."
+        ),
+    }]
+    return request
+
+
 async def run_phase2b(
     transport: UpstreamTransport,
     headers: dict[str, str],
@@ -192,6 +221,33 @@ async def run_phase2b(
     decisions: list[Phase2bBranchDecision] = []
     try:
         async with asyncio.timeout(config.phase2b.total_timeout_seconds):
+            boundary_result = await _try_boundary_verifier(
+                transport,
+                headers,
+                body,
+                classification,
+                config,
+                request_id,
+                call_budget,
+            )
+            if boundary_result is not None:
+                boundary_answer, boundary_summary = boundary_result
+                boundary_payload = await _finalize_boundary_verifier_payload(
+                    transport=transport,
+                    headers=headers,
+                    body=body,
+                    classification=classification,
+                    config=config,
+                    request_id=request_id,
+                    call_budget=call_budget,
+                    candidate_answer=boundary_answer,
+                    summary_text=boundary_summary,
+                    exact_output=exact_output,
+                )
+                if boundary_payload is not None:
+                    synthetic_upstream = _payload_upstream_result(boundary_payload)
+                    return Phase2bExecutionResult("phase2b", synthetic_upstream, decisions, boundary_payload, None)
+
             baseline_result = await _send(
                 transport, headers, body, classification.replay_safe, request_id, "baseline", call_budget
             )
@@ -215,31 +271,6 @@ async def run_phase2b(
                 )
                 if counting_payload is not None:
                     return Phase2bExecutionResult("phase2b", baseline, decisions, counting_payload, None)
-
-            boundary_result = await _try_boundary_verifier(
-                transport,
-                headers,
-                body,
-                classification,
-                config,
-                request_id,
-                call_budget,
-            )
-            if boundary_result is not None:
-                boundary_answer, boundary_summary = boundary_result
-                boundary_payload = await _finalize_fast_path_payload(
-                    transport=transport,
-                    headers=headers,
-                    body=body,
-                    classification=classification,
-                    request_id=request_id,
-                    call_budget=call_budget,
-                    candidate_answer=boundary_answer,
-                    summary_text=boundary_summary,
-                    exact_output=exact_output,
-                )
-                if boundary_payload is not None:
-                    return Phase2bExecutionResult("phase2b", baseline, decisions, boundary_payload, None)
 
             ledger = (
                 build_constraint_ledger(classification.effective_prompt_surface)
@@ -671,6 +702,55 @@ async def _finalize_fast_path_payload(
     )
 
 
+async def _finalize_boundary_verifier_payload(
+    transport: UpstreamTransport,
+    headers: dict[str, str],
+    body: dict[str, Any],
+    classification: ClassificationResult,
+    config: ProxyConfig,
+    request_id: str,
+    call_budget: CallBudget,
+    candidate_answer: str,
+    summary_text: str,
+    exact_output: bool,
+) -> dict[str, Any] | None:
+    if exact_output:
+        return {
+            "type": "message",
+            "content": [{"type": "text", "text": candidate_answer}],
+        }
+    explanation = await _send(
+        transport,
+        headers,
+        build_boundary_explanation_prompt(
+            body,
+            config.phase2b.boundary_verifier.lower_bound,
+            config.phase2b.boundary_verifier.upper_bound,
+            candidate_answer,
+        ),
+        classification.replay_safe,
+        request_id,
+        "boundary-explainer",
+        call_budget,
+    )
+    payload = _finalized_payload(explanation, candidate_answer, exact_output=False)
+    if payload is not None:
+        return payload
+    return {
+        "type": "message",
+        "content": [{"type": "text", "text": candidate_answer}],
+    }
+
+
+def _payload_upstream_result(payload: dict[str, Any]) -> UpstreamResult:
+    return UpstreamResult(
+        status_code=200,
+        headers={"content-type": "application/json"},
+        body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        streamed=False,
+    )
+
+
 async def _send(
     transport: UpstreamTransport,
     headers: dict[str, str],
@@ -1042,7 +1122,7 @@ def _matches_non_negated_patterns(surface: str, patterns: list[str]) -> bool:
 
 
 def _requests_explanatory_output(text: str) -> bool:
-    return bool(re.search(r"\b(explain|each step|step by step|show your work|why|reasoning|analysis)\b|解释|步骤|推理|分析", text, re.IGNORECASE))
+    return bool(re.search(r"\b(explain|each step|step by step|show your work|why|reasoning|analysis)\b|解释|说明|理由|步骤|推理|分析", text, re.IGNORECASE))
 
 
 def _requests_structured_output_format(text: str) -> bool:

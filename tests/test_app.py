@@ -61,6 +61,20 @@ def test_factory_create_app_uses_default_example_config() -> None:
     assert app is not None
 
 
+def test_default_config_path_prefers_project_local_claude_config(monkeypatch, tmp_path) -> None:
+    from proxy.app import _default_config_path
+
+    project_root = tmp_path / "repo"
+    project_root.mkdir()
+    (project_root / ".claude").mkdir()
+    local_config = project_root / ".claude" / "cc-proxy.toml"
+    local_config.write_text("placeholder", encoding="utf-8")
+    monkeypatch.chdir(project_root)
+    monkeypatch.delenv("CC_PROXY_CONFIG", raising=False)
+
+    assert _default_config_path() == local_config
+
+
 def test_ready_endpoint_reports_probe_state(config) -> None:
     from proxy.app import create_app
 

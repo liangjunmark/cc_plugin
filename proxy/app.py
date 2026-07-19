@@ -395,10 +395,20 @@ def _is_anthropic_content_block(item: Any) -> bool:
 
 
 def _load_default_config() -> ProxyConfig:
-    config_path = Path(os.environ.get("CC_PROXY_CONFIG", "proxy/config.toml.example"))
+    config_path = _default_config_path()
     config = load_config(config_path)
     validate_runtime_config(config)
     return config
+
+
+def _default_config_path() -> Path:
+    configured = os.environ.get("CC_PROXY_CONFIG")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    project_local = Path(".claude/cc-proxy.toml")
+    if project_local.exists():
+        return project_local.resolve()
+    return Path("proxy/config.toml.example").resolve()
 
 
 def _validate_request_payload(payload: dict[str, Any]) -> str | None:
