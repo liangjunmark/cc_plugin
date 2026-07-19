@@ -34,9 +34,96 @@ That sets:
 Current validated uplift is intentionally narrow:
 
 - ordinary Claude Code CLI traffic can pass through the proxy,
-- validated reasoning uplift currently targets narrow exact-output prompt families,
+- validated reasoning uplift currently targets a narrow reasoning subset,
 - eligible `phase2b` Claude Code CLI `stream=true` requests now use an internal non-stream solve plus synthesized Anthropic SSE bridge,
-- the most stable gains so far are the candy boundary family and guarantee-counting family handled by `phase2b`.
+- the most stable gains so far are the candy boundary family and guarantee-counting family handled by `phase2b`,
+- when `phase2b` is used, the proxy now tries to preserve the user's requested output style instead of forcing answer-only output.
+
+### Project-Local Setup
+
+If you want `Claude Code CLI` to use the proxy only in this repository, keep everything under `.claude/` and do not touch your global shell profile.
+
+1. Create a repo-local proxy config.
+
+```bash
+mkdir -p .claude
+cp proxy/config.claude-code.toml.example .claude/cc-proxy.toml
+```
+
+2. Edit `.claude/cc-proxy.toml`.
+
+- set `[upstream].base_url` to your Anthropic-compatible provider,
+- keep `request_log_dir = "logs/requests"`,
+- choose a free local port such as `8791`.
+
+3. Create or update `.claude/settings.local.json` so Claude Code CLI points at the local proxy only for this repo.
+
+Example:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "<your-provider-token>",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8791",
+    "ANTHROPIC_MODEL": "<your-provider-model>",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "<your-provider-model>",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "<your-provider-model>",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "<your-provider-model>",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "<your-provider-model>",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "<your-provider-model>",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "<your-provider-model>",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "<your-provider-model>",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "<your-provider-model>",
+    "CC_PROXY_CONFIG": "/abs/path/to/cc_plugin/.claude/cc-proxy.toml",
+    "CC_PROXY_PORT": "8791"
+  }
+}
+```
+
+Notes:
+
+- `.claude/` is gitignored in this repo, so project-local provider settings stay local.
+- If you already have `permissions` or other local Claude settings, merge the `env` block instead of replacing the file.
+- `settings.json` and `settings.local.json` are both repo-local; use either if your Claude Code setup prefers one, but keep the JSON valid because malformed files are skipped completely.
+
+4. Start the proxy from the repo root.
+
+```bash
+CC_PROXY_CONFIG=/abs/path/to/cc_plugin/.claude/cc-proxy.toml \
+CC_PROXY_PORT=8791 \
+./scripts/start-claude-code-proxy.sh
+```
+
+5. Start `Claude Code CLI` from this repository and ask your test question. The CLI should use `http://127.0.0.1:8791` only for this repo.
+
+### Project-Local Testing
+
+Recommended smoke checks before opening Claude Code CLI:
+
+```bash
+curl -sf http://127.0.0.1:8791/health
+curl -sf http://127.0.0.1:8791/ready
+```
+
+Then test from the repo root:
+
+1. Restart `Claude Code CLI` after changing `.claude/settings*.json`.
+2. Ask the target question directly in the CLI.
+3. Inspect `logs/requests/<request-id>/metadata.json` and `attempt-*-request.json` if the answer is wrong or the proxy path is not being used.
+
+Useful local checks while testing:
+
+```bash
+ss -ltnp | rg ':8791\\b'
+find logs/requests -maxdepth 1 -mindepth 1 -type d | tail
+tail -f logs/claude-code-proxy-local.log
+```
+
+What to expect:
+
+- title-generation requests and main user requests are logged separately,
+- eligible `phase2b` streamed Claude Code requests are internally solved with `stream = false` and returned to the CLI as Anthropic-compatible SSE,
+- the current uplift is still narrow; a passing candy test does not imply broad reasoning improvement across all prompts.
 
 ## Start
 

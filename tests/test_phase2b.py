@@ -193,6 +193,52 @@ async def test_run_phase2b_uses_counting_guarantee_fast_path_for_category_guaran
     assert len(transport.requests) == 1
 
 
+@pytest.mark.asyncio
+async def test_run_phase2b_preserves_brief_reasoning_when_original_prompt_is_not_exact_output(config) -> None:
+    from proxy.phase2b import run_phase2b
+
+    phase2b_config = _phase2b_config_without_checks(config)
+    transport = StubTransport([
+        _message("14"),
+        _message('{"candidate_answer":"21"}'),
+        _message("bad branch"),
+        _message("bad branch"),
+        _message("因为 20 仍可能失败，而 21 已经可以保证，所以最少是 21。"),
+    ])
+    body = {
+        "model": "m",
+        "max_tokens": 4096,
+        "stream": False,
+        "messages": [
+            {
+                "role": "user",
+                "content": "这是一个需要最少保证数量的问题。请简要说明关键理由，并给出最终答案。",
+            }
+        ],
+    }
+    classification = ClassificationResult(
+        "rewrite",
+        5,
+        True,
+        None,
+        "这是一个需要最少保证数量的问题 请简要说明关键理由 并给出最终答案",
+    )
+
+    result = await run_phase2b(
+        transport=transport,
+        headers={},
+        body=body,
+        classification=classification,
+        config=phase2b_config,
+        request_id="req-brief-reasoning",
+    )
+
+    assert result.mode == "phase2b"
+    assert result.downstream_payload["content"] == [
+        {"type": "text", "text": "因为 20 仍可能失败，而 21 已经可以保证，所以最少是 21。"}
+    ]
+
+
 def test_counting_guarantee_parser_ignores_required_count_clause() -> None:
     from proxy.phase2b import _extract_category_counts
 
@@ -408,6 +454,40 @@ def test_is_phase2b_eligible_accepts_boundary_verifier_prompt_family(config) -> 
     ) is True
 
 
+def test_is_phase2b_eligible_accepts_boundary_verifier_prompt_family_with_brief_explanation_request(config) -> None:
+    from proxy.phase2b import is_phase2b_eligible
+
+    body = {
+        "model": "m",
+        "max_tokens": 4096,
+        "stream": False,
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。"
+                    "现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果"
+                    "才能保证手中同时拥有不同形状的苹果味和桃子味的糖？\n苹果味 桃子味 西瓜味\n圆形 7 9 8\n五角星形 7 6 4\n"
+                    "请简要说明关键理由，并给出最终答案。"
+                ),
+            }
+        ],
+    }
+    classification = ClassificationResult(
+        "rewrite",
+        5,
+        True,
+        None,
+        "在一个黑色的袋子里 形状靠手感可以分辨 苹果味 桃子味 西瓜味 圆形 7 9 8 五角星形 7 6 4 最少 请简要说明关键理由并给出最终答案",
+    )
+
+    assert is_phase2b_eligible(
+        body,
+        classification,
+        _phase2b_config_with_boundary_verifier(config),
+    ) is True
+
+
 def test_is_phase2b_eligible_rejects_unvalidated_modulo_exact_output_prompt(config) -> None:
     from proxy.phase2b import is_phase2b_eligible
 
@@ -501,7 +581,7 @@ def test_prompt_builders_preserve_request_and_add_internal_instructions() -> Non
     branch = build_branch_prompt(body, "premise_first")
     audit = build_assumption_audit_prompt(body, "candidate_answer: 21", ["target is guarantee, not existence"])
     attack = build_worst_case_attack_prompt(body, "candidate_answer: 21", ["target is guarantee, not existence"])
-    final = build_final_compressor_prompt(body, "21")
+    final = build_final_compressor_prompt(body, "21", exact_output=True)
 
     assert body["stream"] is True
     assert branch["stream"] is False

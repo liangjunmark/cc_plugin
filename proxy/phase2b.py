@@ -44,11 +44,6 @@ def is_phase2b_eligible(
         and body.get("tool_choice") in (None, "auto")
         and _is_single_turn_user_request(body)
         and bool(latest_user_text)
-        and (
-            _matches_non_negated_patterns(surface, config.classification.output_constraint_patterns)
-            or _matches_non_negated_patterns(prepared_surface, config.classification.output_constraint_patterns)
-        )
-        and not _requests_explanatory_output(surface)
         and not _requests_structured_output_format(prepared_surface)
         and not _matches_patterns(surface, config.classification.code_marker_patterns)
         and _is_stable_phase2b_prompt_family(surface, config)
@@ -76,14 +71,6 @@ def prepare_phase2b_body(
     else:
         request = deepcopy(body)
         request["stream"] = False
-    surface = extract_effective_prompt_surface(request)
-    if (
-        config.phase2b.require_exact_output_requests
-        and _is_stable_phase2b_prompt_family(surface, config)
-        and not _matches_non_negated_patterns(surface, config.classification.output_constraint_patterns)
-        and not _requests_structured_output_format(surface)
-    ):
-        _append_exact_output_to_latest_user_message(request)
     return request
 
 
@@ -99,22 +86,6 @@ def build_constraint_ledger(surface: str) -> list[str]:
     if "苹果" in surface or "apple" in lowered:
         ledger.append("success condition requires apple and peach across opposite shapes")
     return ledger
-
-
-def _append_exact_output_to_latest_user_message(body: dict[str, Any]) -> None:
-    messages = body.get("messages")
-    if not isinstance(messages, list):
-        return
-    for index in range(len(messages) - 1, -1, -1):
-        message = messages[index]
-        if not isinstance(message, dict) or message.get("role") != "user":
-            continue
-        content = message.get("content")
-        if isinstance(content, str):
-            if "只输出" in content or "only output" in content.lower():
-                return
-            message["content"] = f"{content}\n只输出最终答案。"
-        return
 
 
 def build_branch_prompt(body: dict[str, Any], branch_family: str) -> dict[str, Any]:
@@ -161,12 +132,19 @@ def build_worst_case_attack_prompt(
     return request
 
 
-def build_final_compressor_prompt(body: dict[str, Any], survivor_text: str) -> dict[str, Any]:
+def build_final_compressor_prompt(body: dict[str, Any], survivor_text: str, exact_output: bool) -> dict[str, Any]:
     request = deepcopy(body)
     request["stream"] = False
+    instruction = (
+        "Internal final compressor. Preserve the surviving solution's answer while satisfying the original output constraint. "
+        "Return only the final answer."
+        if exact_output
+        else "Internal final compressor. Preserve the surviving solution's answer while matching the original output style. "
+        "If the original task asks for explanation, keep it brief and end with the final answer."
+    )
     request["system"] = _append_system_text(
         request.get("system"),
-        "Internal final compressor. Preserve the surviving solution's answer while satisfying the original output constraint. Return only the final answer.\n\nSurviving branch:\n"
+        instruction + "\n\nSurviving branch:\n"
         + survivor_text,
     )
     return request
@@ -209,6 +187,7 @@ async def run_phase2b(
         raise ValueError("Phase 2b does not support streamed requests")
 
     call_budget = CallBudget(config.phase2b.max_total_upstream_calls)
+    exact_output = _prefers_exact_output(classification.effective_prompt_surface, config)
     baseline: UpstreamResult | None = None
     decisions: list[Phase2bBranchDecision] = []
     try:
@@ -286,6 +265,7 @@ async def run_phase2b(
                         trusted_baseline_answer,
                         candidate_answer,
                         baseline,
+                        exact_output,
                     ):
                         baseline_payload = _baseline_fast_path_payload(baseline)
                         if baseline_payload is not None:
@@ -310,6 +290,7 @@ async def run_phase2b(
                     trusted_baseline_answer,
                     validated_answer,
                     baseline,
+                    exact_output,
                 ):
                     baseline_payload = _baseline_fast_path_payload(baseline)
                     if baseline_payload is not None:
@@ -329,11 +310,11 @@ async def run_phase2b(
             )
             if selected is None:
                 return _fallback(baseline, decisions, "tiebreak_failed")
-            direct_payload = _selected_survivor_direct_payload(selected[3], selected[1], selected[2])
+            direct_payload = _selected_survivor_direct_payload(selected[3], selected[1], selected[2], exact_output)
             if direct_payload is not None:
                 return Phase2bExecutionResult("phase2b", baseline, decisions, direct_payload, None)
             downstream_payload = await _finalize_survivor(
-                transport, headers, body, classification, request_id, call_budget, selected[1], selected[2]
+                transport, headers, body, classification, request_id, call_budget, selected[1], selected[2], exact_output
             )
             if downstream_payload is None:
                 return _fallback(baseline, decisions, "final_compression_failed")
@@ -597,7 +578,10 @@ def _selected_survivor_direct_payload(
     result: UpstreamResult,
     survivor_text: str,
     candidate_answer: str,
+    exact_output: bool,
 ) -> dict[str, Any] | None:
+    if not exact_output:
+        return None
     stripped = survivor_text.strip()
     if (
         stripped != candidate_answer
@@ -622,12 +606,13 @@ async def _finalize_survivor(
     call_budget: CallBudget,
     survivor_text: str,
     candidate_answer: str,
+    exact_output: bool,
 ) -> dict[str, Any] | None:
     result = await _send(
-        transport, headers, build_final_compressor_prompt(body, survivor_text), classification.replay_safe,
+        transport, headers, build_final_compressor_prompt(body, survivor_text, exact_output), classification.replay_safe,
         request_id, "final-compressor", call_budget,
     )
-    return _final_text_only_payload(result, candidate_answer)
+    return _finalized_payload(result, candidate_answer, exact_output)
 
 
 async def _send(
@@ -718,7 +703,10 @@ def _should_fast_path_to_baseline(
     trusted_baseline_answer: str | None,
     validated_answer: str,
     baseline: UpstreamResult,
+    exact_output: bool,
 ) -> bool:
+    if not exact_output:
+        return False
     if branch_id not in BASELINE_FAST_PATH_TRUSTED_BRANCHES:
         return False
     if trusted_baseline_answer is None or validated_answer != trusted_baseline_answer:
@@ -736,8 +724,10 @@ def _baseline_fast_path_payload(result: UpstreamResult) -> dict[str, Any] | None
     return canonical_payload
 
 
-def _final_text_only_payload(
-    result: UpstreamResult, candidate_answer: str
+def _finalized_payload(
+    result: UpstreamResult,
+    candidate_answer: str,
+    exact_output: bool,
 ) -> dict[str, Any] | None:
     if not 200 <= result.status_code < 300:
         return None
@@ -759,15 +749,21 @@ def _final_text_only_payload(
     ):
         return None
     text = "".join(block["text"] for block in payload["content"]).strip()
-    if (
-        text != candidate_answer.strip()
-        or not _is_compact_final_answer(text)
-        or _contains_internal_artifact(text)
-    ):
+    if _contains_internal_artifact(text):
         return None
-    canonical_payload = deepcopy(payload)
-    canonical_payload["content"] = [{"type": "text", "text": candidate_answer}]
-    return canonical_payload
+    if exact_output:
+        if text != candidate_answer.strip() or not _is_compact_final_answer(text):
+            return None
+        canonical_payload = deepcopy(payload)
+        canonical_payload["content"] = [{"type": "text", "text": candidate_answer}]
+        return canonical_payload
+    normalized_candidate = _normalize_branch_candidate_answer(candidate_answer)
+    normalized_text_answer = _normalize_branch_candidate_answer(text)
+    if normalized_candidate is not None and normalized_text_answer == normalized_candidate:
+        return payload
+    if candidate_answer.strip() in text:
+        return payload
+    return None
 
 
 def _boundary_verifier_payload(
@@ -940,6 +936,10 @@ def _normalize_user_text(text: str) -> str | None:
         return stripped
     original = text.strip()
     return original or None
+
+
+def _prefers_exact_output(surface: str, config: ProxyConfig) -> bool:
+    return _matches_non_negated_patterns(surface, config.classification.output_constraint_patterns)
 
 
 def _append_system_text(system: Any, suffix: str) -> Any:

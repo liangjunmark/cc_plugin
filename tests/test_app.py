@@ -452,7 +452,7 @@ def test_messages_return_phase2b_baseline_as_stream_for_streamed_requests(config
     assert b'"text":"21"' in response.content
 
 
-def test_messages_phase2b_internal_exact_output_normalization_allows_raw_candy_prompt_for_streamed_requests(
+def test_messages_phase2b_preserves_raw_candy_prompt_for_streamed_requests_without_forcing_exact_output(
     config, monkeypatch
 ) -> None:
     from proxy.app import create_app
@@ -518,7 +518,7 @@ def test_messages_phase2b_internal_exact_output_normalization_allows_raw_candy_p
     assert b'"text":"21"' in response.content
     assert len(phase2b_bodies) == 1
     assert phase2b_bodies[0]["stream"] is False
-    assert "只输出最终答案。" in phase2b_bodies[0]["messages"][0]["content"]
+    assert "只输出最终答案。" not in phase2b_bodies[0]["messages"][0]["content"]
     assert transport.calls == []
 
 
@@ -612,7 +612,7 @@ def test_messages_phase2b_extracts_latest_user_problem_from_claude_code_wrapped_
                 "在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。"
                 "现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果"
                 "才能保证手中同时拥有不同形状的苹果味和桃子味的糖？（同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味"
-                "匹配五角星苹果味糖果都满足要求）\n苹果味 桃子味 西瓜味\n圆形 7 9 8\n五角星形 7 6 4\n只输出最终答案。"
+                "匹配五角星苹果味糖果都满足要求）\n苹果味 桃子味 西瓜味\n圆形 7 9 8\n五角星形 7 6 4"
             ),
         }
     ]
