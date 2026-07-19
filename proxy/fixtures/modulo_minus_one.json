@@ -1,0 +1,6 @@
+{
+  "name": "modulo_minus_one",
+  "expected_answer": "59",
+  "exact_output_required": true,
+  "prompt": "某个正整数除以 4 余 3，除以 5 余 4，除以 6 余 5。满足条件的最小正整数是多少？只输出最终答案。"
+}

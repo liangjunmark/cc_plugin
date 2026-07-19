@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import httpx
 import pytest
@@ -113,6 +114,91 @@ async def test_send_with_retry_retries_transport_error_once(config: object, tmp_
 
     assert calls == 2
     assert result.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_retries_known_xfyun_transient_api_error_once(
+    config: object,
+    tmp_path: Path,
+) -> None:
+    config.upstream.base_url = "https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic"
+    calls = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                500,
+                json={
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "code": 10012,
+                        "message": (
+                            "ase api error: code=10910, message=error, "
+                            "Prefill transfer failed for request rank=0 "
+                            "req.rid='mds000da36c@hu19f79aa864df058882' "
+                            "req.bootstrap_room=749834131645227052 with exception "
+                            "KVTransferError(bootstrap_room=749834131645227052): "
+                            "Decode instance could be dead, remote mooncake session "
+                            "10.104.72.14:15470 is not alive;code=0"
+                        ),
+                    },
+                },
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        transport = UpstreamTransport(client, config, Recorder(tmp_path, config))
+        result = await transport.send_with_retry(
+            context=RequestContext(request_id="req-xf-transient", attempt=1, log_dir=Path("req-xf-transient")),
+            headers={},
+            body={"model": "test"},
+            replay_safe=True,
+            stream=False,
+        )
+
+    assert calls == 2
+    assert result.status_code == 200
+    attempt1_response = json.loads(
+        (tmp_path / "req-xf-transient" / "attempt-1-response.json").read_text(encoding="utf-8")
+    )
+    assert attempt1_response["retrying"] is True
+    assert attempt1_response["retry_reason"] == "xfyun_transient_api_error"
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_does_not_retry_unknown_500_api_error(config: object, tmp_path: Path) -> None:
+    config.upstream.base_url = "https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic"
+    calls = 0
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            500,
+            json={
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": "unexpected internal failure",
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        transport = UpstreamTransport(client, config, Recorder(tmp_path, config))
+        result = await transport.send_with_retry(
+            context=RequestContext(request_id="req-xf-non-transient", attempt=1, log_dir=Path("req-xf-non-transient")),
+            headers={},
+            body={"model": "test"},
+            replay_safe=True,
+            stream=False,
+        )
+
+    assert calls == 1
+    assert result.status_code == 500
 
 
 @pytest.mark.asyncio

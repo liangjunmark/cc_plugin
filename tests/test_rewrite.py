@@ -1,4 +1,6 @@
 import copy
+import json
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +17,27 @@ def test_replay_safe_rejects_tool_use_blocks() -> None:
     replay_safe, reason = is_replay_safe(body)
     assert replay_safe is False
     assert reason == "tool_state_present"
+
+
+@pytest.mark.parametrize(
+    "tooling",
+    [
+        {"tools": [{"name": "shell", "input_schema": {"type": "object"}}]},
+        {"tool_choice": {"type": "any"}},
+    ],
+)
+def test_replay_safe_rejects_tooling_declared(tooling: dict[str, object]) -> None:
+    body = {
+        "model": "m",
+        "max_tokens": 512,
+        "messages": [{"role": "user", "content": "Only answer 21"}],
+        **tooling,
+    }
+
+    replay_safe, reason = is_replay_safe(body)
+
+    assert replay_safe is False
+    assert reason == "tooling_declared"
 
 
 def test_replay_safe_rejects_assistant_continuation_after_latest_user() -> None:
@@ -81,6 +104,46 @@ def test_candy_prompt_reaches_rewrite_band(config) -> None:
         ],
     }
     result = classify_request(body, config)
+    assert result.route == "rewrite"
+    assert result.score >= config.classification.rewrite_score_threshold
+
+
+def test_real_candy_fixture_reaches_rewrite_band(config) -> None:
+    fixture = json.loads(Path("proxy/fixtures/candy_question.json").read_text(encoding="utf-8"))
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": fixture["prompt"],
+            }
+        ],
+        "max_tokens": 32,
+    }
+
+    result = classify_request(body, config)
+
+    assert result.route == "rewrite"
+    assert result.score >= config.classification.rewrite_score_threshold
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["digit_swap_sum", "modulo_minus_one", "door_toggle_100"],
+)
+def test_numeric_exact_output_fixtures_reach_rewrite_band(config, fixture_name: str) -> None:
+    fixture = json.loads(Path(f"proxy/fixtures/{fixture_name}.json").read_text(encoding="utf-8"))
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": fixture["prompt"],
+            }
+        ],
+        "max_tokens": 32,
+    }
+
+    result = classify_request(body, config)
+
     assert result.route == "rewrite"
     assert result.score >= config.classification.rewrite_score_threshold
 
@@ -163,14 +226,89 @@ def test_apply_rewrites_preserves_system_block_lists_and_suffix_limit(config) ->
     assert len(result.body["system"][-1]["text"]) <= 20
 
 
+def test_apply_rewrites_adds_premise_binding_guardrail_for_distinguishable_guarantee_problem(config) -> None:
+    config.rewrite.enabled = True
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "不同形状可以靠手感区分。最少取出多少个糖果才能保证满足条件？"
+                    "这是保证题，不是概率题。"
+                ),
+            }
+        ],
+        "max_tokens": 32,
+    }
+
+    result = apply_rewrites(body, config, capability_flags={"thinking": False})
+
+    assert "premise_binding_guardrail" in result.metadata["applied_rules"]
+    system_text = str(result.body["system"])
+    assert "distinguishable" in system_text.lower()
+    assert "controllable" in system_text.lower()
+    assert "bucket" in system_text.lower()
+    assert "blind random draw" in system_text.lower()
+    assert "quota" in system_text.lower()
+    assert "single-bucket" in system_text.lower()
+
+
+def test_apply_rewrites_adds_minimum_guarantee_guardrail_for_counting_guarantee_problem(config) -> None:
+    config.rewrite.enabled = True
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "一个盒子里有红球8个、蓝球7个、绿球6个。"
+                    "随机摸球（不放回），至少要摸多少个，才能保证红球、蓝球、绿球三种颜色都至少各有2个？"
+                    "只输出最终答案。"
+                ),
+            }
+        ],
+        "max_tokens": 32,
+    }
+
+    result = apply_rewrites(body, config, capability_flags={"thinking": False})
+
+    assert "minimum_guarantee_guardrail" in result.metadata["applied_rules"]
+    system_text = str(result.body["system"])
+    assert "largest draw count" in system_text.lower()
+    assert "fail the target" in system_text.lower()
+    assert "add one more draw" in system_text.lower()
+
+
+def test_apply_rewrites_respects_disabled_premise_binding_guardrail(config) -> None:
+    config.rewrite.enabled = True
+    config.rewrite.premise_binding_guardrail.enabled = False
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "不同形状可以靠手感区分。最少取出多少个糖果才能保证满足条件？"
+                    "这是保证题，不是概率题。"
+                ),
+            }
+        ],
+        "max_tokens": 32,
+    }
+
+    result = apply_rewrites(body, config, capability_flags={"thinking": False})
+
+    assert "premise_binding_guardrail" not in result.metadata["applied_rules"]
+    assert "system" not in result.body
+
+
 def test_invalid_regex_config_fails_runtime_validation(tmp_path) -> None:
-    from tests.test_config import valid_config_body, write_config
     from proxy.config import load_config, validate_runtime_config
 
-    path = write_config(
-        tmp_path,
-        valid_config_body().replace('reasoning_keyword_patterns = ["最少", "minimum"]', 'reasoning_keyword_patterns = ["("]'),
+    body = Path("proxy/config.toml.example").read_text(encoding="utf-8").replace(
+        'reasoning_keyword_patterns = ["最少", "minimum"]',
+        'reasoning_keyword_patterns = ["("]',
     )
+    path = tmp_path / "config.toml"
+    path.write_text(body, encoding="utf-8")
 
     with pytest.raises(ValueError, match="invalid regex"):
         validate_runtime_config(load_config(path))

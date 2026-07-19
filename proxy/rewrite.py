@@ -8,6 +8,19 @@ from typing import Any
 from proxy.config import ProxyConfig
 
 STRICT_FORMAT_SUFFIX = "Return only the final answer when the user requests exact output."
+PREMISE_BINDING_SUFFIX = (
+    "If the prompt says an attribute is distinguishable or can be deliberately selected during the process, "
+    "treat that attribute as controllable rather than as a blind random draw. "
+    "Reason in separate observable buckets defined by that distinguishable attribute before combining cases. "
+    "Choose and evaluate explicit draw quotas across those buckets before applying worst-case hidden-attribute assignments. "
+    "Do not collapse the process into a single-bucket extreme unless the prompt explicitly forces that restriction. "
+    "For minimum or guarantee questions, reason from the worst-case construction under that binding premise before answering."
+)
+MINIMUM_GUARANTEE_SUFFIX = (
+    "For minimum or guarantee questions, explicitly identify the largest draw count that can still fail the target, "
+    "then add one more draw to obtain the guarantee. If the prompt lists several categories, compare the failure case "
+    "for each category and keep the maximum failing draw count."
+)
 
 
 @dataclass(slots=True)
@@ -26,10 +39,14 @@ class RewriteResult:
 
 
 def is_replay_safe(body: dict[str, Any]) -> tuple[bool, str | None]:
+    if body.get("tools"):
+        return False, "tooling_declared"
+    if body.get("tool_choice") not in (None, "auto"):
+        return False, "tooling_declared"
     text = str(body)
-    if any(marker in text for marker in ("tool_use", "tool_result", "tool_choice")):
+    if any(marker in text for marker in ("tool_use", "tool_result")):
         return False, "tool_state_present"
-    if re.search(r"\b(apply this patch now|run this command now)\b", text, re.IGNORECASE):
+    if _has_side_effect_edit_intent(text):
         return False, "side_effect_intent"
     messages = body.get("messages")
     if not isinstance(messages, list):
@@ -100,9 +117,13 @@ def classify_request(body: dict[str, Any], config: ProxyConfig) -> Classificatio
         score += 1
     if len(surface) >= config.classification.min_chars or surface.count("\n") >= config.classification.min_line_breaks:
         score += 1
-    if any(pattern.search(surface) for pattern in _compile_patterns(config.classification.reasoning_keyword_patterns)):
+    if _matches_patterns(surface, config.classification.reasoning_keyword_patterns):
         score += 1
-    if any(pattern.search(surface) for pattern in _compile_patterns(config.classification.output_constraint_patterns)):
+    if _matches_patterns(surface, config.classification.output_constraint_patterns):
+        score += 1
+    if _matches_patterns(surface, config.classification.premise_control_patterns):
+        score += 1
+    if _looks_numeric_reasoning(surface):
         score += 1
     if score >= config.classification.rewrite_score_threshold:
         route = "rewrite"
@@ -141,8 +162,28 @@ def apply_rewrites(
         applied.append("explicit_thinking")
     surface = extract_effective_prompt_surface(rewritten)
     if (
+        config.rewrite.premise_binding_guardrail.enabled
+        and
+        _matches_patterns(surface, config.classification.reasoning_keyword_patterns)
+        and _matches_patterns(surface, config.classification.premise_control_patterns)
+    ):
+        rewritten["system"] = _append_system_suffix(
+            rewritten.get("system"),
+            PREMISE_BINDING_SUFFIX,
+        )
+        applied.append("premise_binding_guardrail")
+    if (
+        config.rewrite.premise_binding_guardrail.enabled
+        and _matches_patterns(surface, tuple(MINIMUM_GUARANTEE_SURFACE_MARKERS))
+    ):
+        rewritten["system"] = _append_system_suffix(
+            rewritten.get("system"),
+            MINIMUM_GUARANTEE_SUFFIX,
+        )
+        applied.append("minimum_guarantee_guardrail")
+    if (
         config.rewrite.strict_format_guardrail.enabled
-        and any(pattern.search(surface) for pattern in _compile_patterns(config.classification.output_constraint_patterns))
+        and _matches_patterns(surface, config.classification.output_constraint_patterns)
     ):
         rewritten["system"] = _append_system_suffix(
             rewritten.get("system"),
@@ -200,6 +241,10 @@ def _compile_patterns(patterns: list[str]) -> list[re.Pattern[str]]:
     return [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
 
 
+def _matches_patterns(surface: str, patterns: list[str]) -> bool:
+    return any(pattern.search(surface) for pattern in _compile_patterns(patterns))
+
+
 def _append_system_suffix(system: Any, suffix: str) -> Any:
     if isinstance(system, list):
         updated = deepcopy(system)
@@ -207,3 +252,23 @@ def _append_system_suffix(system: Any, suffix: str) -> Any:
         return updated
     base = "" if system is None else str(system)
     return f"{base}\n{suffix}".strip()
+
+
+MINIMUM_GUARANTEE_SURFACE_MARKERS = ("minimum", "worst case", "guarantee", "最少", "至少", "保证")
+
+
+def _has_side_effect_edit_intent(text: str) -> bool:
+    normalized = " ".join(text.split())
+    if re.search(r"\b(apply this patch now|run this command now)\b", normalized, re.IGNORECASE):
+        return True
+    return bool(
+        re.search(
+            r"\b(edit|modify|update|rewrite|patch|refactor)\b(?:\s+\w+){0,6}\s+\b(file|code|repo|function|class|module|script|text|prompt)\b",
+            normalized,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _looks_numeric_reasoning(surface: str) -> bool:
+    return len(re.findall(r"\d+", surface)) >= 2

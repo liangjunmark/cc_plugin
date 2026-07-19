@@ -58,6 +58,10 @@ class SystemCompressionConfig(BaseModel):
     target_system_chars: int = Field(ge=1)
 
 
+class PremiseBindingGuardrailConfig(BaseModel):
+    enabled: bool = True
+
+
 class RewriteConfig(BaseModel):
     enabled: bool = False
     max_tokens_floor: MaxTokensFloorConfig
@@ -65,6 +69,9 @@ class RewriteConfig(BaseModel):
     message_canonicalization: MessageCanonicalizationConfig
     strict_format_guardrail: StrictFormatGuardrailConfig
     system_compression: SystemCompressionConfig
+    premise_binding_guardrail: PremiseBindingGuardrailConfig = Field(
+        default_factory=PremiseBindingGuardrailConfig
+    )
 
 
 class ClassificationConfig(BaseModel):
@@ -73,9 +80,49 @@ class ClassificationConfig(BaseModel):
     min_line_breaks: int = Field(ge=0)
     reasoning_keyword_patterns: list[str]
     output_constraint_patterns: list[str]
+    premise_control_patterns: list[str] = Field(default_factory=list)
     code_marker_patterns: list[str]
     rewrite_score_threshold: int = Field(ge=0)
     normalize_only_score_threshold: int = Field(ge=0)
+
+
+class Phase2Config(BaseModel):
+    enabled: bool = False
+    trigger_on_routes: list[str]
+    sample_count: int = Field(ge=2, le=5)
+    max_adjudication_calls: int = Field(ge=0, le=1)
+    max_parallelism: int = Field(ge=1)
+    total_timeout_seconds: float = Field(gt=0.0)
+    require_json_candidates: bool = True
+    candidate_roles: list[str]
+    max_candidate_output_tokens: int = Field(ge=1)
+    max_total_upstream_calls: int = Field(ge=1, le=7)
+    fallback_to_phase1_on_failure: bool = True
+    cost_budget_multiplier: float = Field(ge=1.0)
+    allow_streaming_requests: bool = False
+
+
+class Phase2bConfig(BaseModel):
+    enabled: bool = False
+    trigger_on_routes: list[str]
+    max_branch_count: int = Field(ge=2, le=5)
+    branch_families: list[str]
+    enable_assumption_audit: bool = True
+    enable_worst_case_attack: bool = True
+    enable_ledger_checks: bool = True
+    max_total_upstream_calls: int = Field(ge=1, le=20)
+    total_timeout_seconds: float = Field(gt=0.0, le=900.0)
+    allow_tiebreak_round: bool = True
+    require_exact_output_requests: bool = True
+    boundary_verifier: "Phase2bBoundaryVerifierConfig" = Field(default_factory=lambda: Phase2bBoundaryVerifierConfig())
+
+
+class Phase2bBoundaryVerifierConfig(BaseModel):
+    enabled: bool = False
+    require_xfyun_upstream: bool = True
+    lower_bound: int = 20
+    upper_bound: int = 21
+    trigger_markers: list[str] = Field(default_factory=list)
 
 
 class ProxyConfig(BaseModel):
@@ -84,6 +131,16 @@ class ProxyConfig(BaseModel):
     logging: LoggingConfig
     rewrite: RewriteConfig
     classification: ClassificationConfig
+    phase2: Phase2Config
+    phase2b: Phase2bConfig
+
+
+KNOWN_PHASE2_ROLES = {"constraint_reasoner", "counterexample_reasoner"}
+PHASE2B_BRANCH_FAMILIES = {
+    "premise_first",
+    "quota_first",
+    "counterexample_first",
+}
 
 
 def load_config(path: str | Path) -> ProxyConfig:
@@ -108,8 +165,64 @@ def validate_runtime_config(config: ProxyConfig) -> None:
             )
     _validate_regex_patterns(config.classification.reasoning_keyword_patterns)
     _validate_regex_patterns(config.classification.output_constraint_patterns)
+    _validate_regex_patterns(config.classification.premise_control_patterns)
     _validate_regex_patterns(config.classification.code_marker_patterns)
     validate_no_self_target(config)
+    validate_phase2_config(config)
+    validate_phase2b_config(config)
+
+
+def validate_phase2_config(config: ProxyConfig) -> None:
+    phase2 = config.phase2
+    if not phase2.require_json_candidates:
+        raise ValueError("phase2.require_json_candidates must remain true in the minimal design")
+    if not phase2.fallback_to_phase1_on_failure:
+        raise ValueError("phase2.fallback_to_phase1_on_failure must remain true in the minimal design")
+    if phase2.max_parallelism > phase2.sample_count:
+        raise ValueError("phase2.max_parallelism must be <= phase2.sample_count")
+    if len(phase2.candidate_roles) != phase2.sample_count:
+        raise ValueError("phase2.candidate_roles length must equal phase2.sample_count")
+    if any(role not in KNOWN_PHASE2_ROLES for role in phase2.candidate_roles):
+        raise ValueError("phase2.candidate_roles contains an unknown role")
+    minimum_calls = 1 + phase2.sample_count + phase2.max_adjudication_calls
+    if phase2.max_total_upstream_calls < minimum_calls:
+        raise ValueError("phase2.max_total_upstream_calls must cover baseline, candidates, and adjudication")
+    if phase2.allow_streaming_requests:
+        raise ValueError("phase2.allow_streaming_requests must remain false in the minimal design")
+
+
+def validate_phase2b_config(config: ProxyConfig) -> None:
+    phase2b = config.phase2b
+    if phase2b.max_branch_count != len(PHASE2B_BRANCH_FAMILIES):
+        raise ValueError("phase2b.max_branch_count must remain 3 in the fixed topology")
+    if len(phase2b.branch_families) != len(PHASE2B_BRANCH_FAMILIES):
+        raise ValueError("phase2b.branch_families must contain exactly 3 entries")
+    if set(phase2b.branch_families) != PHASE2B_BRANCH_FAMILIES:
+        raise ValueError(
+            "phase2b.branch_families must be exactly premise_first, quota_first, and counterexample_first"
+        )
+    if not phase2b.require_exact_output_requests:
+        raise ValueError("phase2b.require_exact_output_requests must remain true in the fixed topology")
+    minimum_calls = 1 + phase2b.max_branch_count
+    if phase2b.boundary_verifier.enabled:
+        if not phase2b.boundary_verifier.require_xfyun_upstream:
+            raise ValueError("phase2b.boundary_verifier must remain xfyun-only in the current experiment")
+        if phase2b.boundary_verifier.upper_bound != phase2b.boundary_verifier.lower_bound + 1:
+            raise ValueError("phase2b.boundary_verifier upper_bound must equal lower_bound + 1")
+        if not phase2b.boundary_verifier.trigger_markers:
+            raise ValueError("phase2b.boundary_verifier trigger_markers must not be empty when enabled")
+        # Reserve one extra slot so a verifier miss does not consume the full
+        # ordinary phase2b safety margin before branch generation begins.
+        minimum_calls += 2
+    if phase2b.enable_assumption_audit:
+        minimum_calls += phase2b.max_branch_count
+    if phase2b.enable_worst_case_attack:
+        minimum_calls += phase2b.max_branch_count
+    if phase2b.allow_tiebreak_round:
+        minimum_calls += 1
+    minimum_calls += 1  # final compressor
+    if phase2b.max_total_upstream_calls < minimum_calls:
+        raise ValueError("phase2b.max_total_upstream_calls must cover baseline, enabled attack stages, and final compression")
 
 
 def validate_no_self_target(config: ProxyConfig) -> None:

@@ -1,0 +1,6 @@
+.claude/
+.superpowers/tmp/
+logs/
+proxy/__pycache__/
+tests/__pycache__/
+*.pyc

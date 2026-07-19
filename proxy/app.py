@@ -9,14 +9,19 @@ from uuid import uuid4
 
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from proxy.config import ProxyConfig, load_config, validate_runtime_config
 from proxy.normalize import anthropic_error, filter_forward_headers
+from proxy.phase2 import is_phase2_eligible, run_phase2
+from proxy.phase2b import is_phase2b_eligible, run_phase2b
 from proxy.recorder import Recorder
 from proxy.rewrite import apply_rewrites, classify_request
 from proxy.schemas import RequestContext
 from proxy.upstream import CapabilityCache, UpstreamResult, UpstreamTransport, probe_stream_support
+
+PHASE_SELECTOR_HEADER = "x-cc-proxy-phase"
 
 
 def create_app(
@@ -54,6 +59,13 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan)
 
+    @app.exception_handler(RequestValidationError)
+    async def handle_validation_error(_: Request, __: RequestValidationError) -> JSONResponse:
+        return JSONResponse(
+            status_code=400,
+            content=anthropic_error(400, "invalid request payload", "invalid_request_error"),
+        )
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -70,8 +82,19 @@ def create_app(
 
     @app.post("/v1/messages")
     async def messages(payload: dict[str, Any], request: Request):
+        validation_error = _validate_request_payload(payload)
+        if validation_error is not None:
+            return JSONResponse(
+                status_code=400,
+                content=anthropic_error(400, validation_error, "invalid_request_error"),
+            )
         request_id = request.headers.get("x-request-id", str(uuid4()))
-        forward_headers = filter_forward_headers(dict(request.headers), set())
+        phase_selector = request.headers.get(PHASE_SELECTOR_HEADER, "auto").strip().lower()
+        forward_headers = {
+            name: value
+            for name, value in filter_forward_headers(dict(request.headers), set()).items()
+            if name.lower() != PHASE_SELECTOR_HEADER
+        }
         classification = classify_request(payload, active_config)
         outgoing_body = payload
         if active_config.rewrite.enabled and classification.route == "rewrite":
@@ -83,6 +106,51 @@ def create_app(
                 },
             )
             outgoing_body = rewrite_result.body
+
+        should_run_phase2b = False
+        if not bool(outgoing_body.get("stream")):
+            if phase_selector == "phase2b":
+                should_run_phase2b = is_phase2b_eligible(outgoing_body, classification, active_config)
+            elif phase_selector not in {"phase1", "phase2"}:
+                should_run_phase2b = is_phase2b_eligible(outgoing_body, classification, active_config)
+
+        if should_run_phase2b:
+            phase2b_result = await run_phase2b(
+                transport=state["transport"],
+                headers=forward_headers,
+                body=outgoing_body,
+                classification=classification,
+                config=active_config,
+                request_id=request_id,
+            )
+            if phase2b_result.downstream_payload is not None:
+                return JSONResponse(status_code=200, content=phase2b_result.downstream_payload)
+            status_code, content = _parse_upstream_json(phase2b_result.baseline_upstream, normalize_error=True)
+            return JSONResponse(status_code=status_code, content=content)
+
+        should_run_phase2 = False
+        if not bool(outgoing_body.get("stream")):
+            if phase_selector == "phase2":
+                should_run_phase2 = is_phase2_eligible(outgoing_body, classification, active_config)
+            elif phase_selector not in {"phase1", "phase2b"}:
+                should_run_phase2 = is_phase2_eligible(outgoing_body, classification, active_config)
+
+        if should_run_phase2:
+            phase2_result = await run_phase2(
+                transport=state["transport"],
+                headers=forward_headers,
+                body=outgoing_body,
+                classification=classification,
+                config=active_config,
+                request_id=request_id,
+            )
+            if phase2_result.downstream_payload is not None:
+                return JSONResponse(status_code=200, content=phase2_result.downstream_payload)
+            status_code, content = _parse_upstream_json(phase2_result.baseline_upstream, normalize_error=True)
+            return JSONResponse(
+                status_code=status_code,
+                content=content,
+            )
 
         context = RequestContext(
             request_id=request_id,
@@ -103,14 +171,26 @@ def create_app(
                     status_code=502,
                     content=anthropic_error(502, "streamed upstream response missing body"),
                 )
+            if not 200 <= upstream.status_code < 300:
+                body = await upstream.response.aread()
+                await upstream.response.aclose()
+                status_code, parsed = _parse_upstream_json(
+                    UpstreamResult(
+                        status_code=upstream.status_code,
+                        headers=upstream.headers,
+                        body=body,
+                    ),
+                    normalize_error=True,
+                )
+                return JSONResponse(status_code=status_code, content=parsed)
             return StreamingResponse(
                 _aiter_upstream_bytes(upstream.response),
                 status_code=upstream.status_code,
                 media_type=_stream_media_type(upstream.headers),
             )
 
-        parsed = _parse_upstream_json(upstream)
-        return JSONResponse(status_code=upstream.status_code, content=parsed)
+        status_code, parsed = _parse_upstream_json(upstream, normalize_error=True)
+        return JSONResponse(status_code=status_code, content=parsed)
 
     return app
 
@@ -127,15 +207,67 @@ def _stream_media_type(headers: dict[str, str]) -> str:
     return headers.get("content-type", "text/event-stream")
 
 
-def _parse_upstream_json(upstream: UpstreamResult) -> dict[str, Any]:
+def _parse_upstream_json(upstream: UpstreamResult, normalize_error: bool = False) -> tuple[int, dict[str, Any]]:
     try:
         parsed = json.loads(upstream.body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
+        if 200 <= upstream.status_code < 300:
+            return 502, anthropic_error(502, "upstream returned an invalid success payload")
         message = upstream.body.decode("utf-8", errors="replace")
-        return anthropic_error(upstream.status_code, message)
+        return upstream.status_code, anthropic_error(upstream.status_code, message)
     if isinstance(parsed, dict):
-        return parsed
-    return anthropic_error(upstream.status_code, "upstream returned a non-object JSON payload")
+        if 200 <= upstream.status_code < 300 and not _is_anthropic_message(parsed):
+            return 502, anthropic_error(502, "upstream returned an invalid success payload")
+        if normalize_error and not 200 <= upstream.status_code < 300 and not _is_anthropic_error(parsed):
+            message = parsed.get("message")
+            return upstream.status_code, anthropic_error(
+                upstream.status_code,
+                message if isinstance(message, str) else "upstream returned an invalid error payload",
+            )
+        return upstream.status_code, parsed
+    if 200 <= upstream.status_code < 300:
+        return 502, anthropic_error(502, "upstream returned an invalid success payload")
+    return upstream.status_code, anthropic_error(upstream.status_code, "upstream returned a non-object JSON payload")
+
+
+def _is_anthropic_message(payload: dict[str, Any]) -> bool:
+    content = payload.get("content")
+    return (
+        payload.get("type") == "message"
+        and isinstance(content, list)
+        and all(_is_anthropic_content_block(item) for item in content)
+    )
+
+
+def _is_anthropic_error(payload: dict[str, Any]) -> bool:
+    error = payload.get("error")
+    return (
+        payload.get("type") == "error"
+        and isinstance(error, dict)
+        and isinstance(error.get("type"), str)
+        and isinstance(error.get("message"), str)
+    )
+
+
+def _is_anthropic_content_block(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    block_type = item.get("type")
+    if not isinstance(block_type, str):
+        return False
+    if block_type == "text":
+        return isinstance(item.get("text"), str)
+    if block_type == "tool_use":
+        return (
+            isinstance(item.get("id"), str)
+            and isinstance(item.get("name"), str)
+            and isinstance(item.get("input"), dict)
+        )
+    if block_type == "thinking":
+        return isinstance(item.get("thinking"), str) and isinstance(item.get("signature"), str)
+    if block_type == "redacted_thinking":
+        return isinstance(item.get("data"), str)
+    return True
 
 
 def _load_default_config() -> ProxyConfig:
@@ -143,3 +275,13 @@ def _load_default_config() -> ProxyConfig:
     config = load_config(config_path)
     validate_runtime_config(config)
     return config
+
+
+def _validate_request_payload(payload: dict[str, Any]) -> str | None:
+    max_tokens = payload.get("max_tokens")
+    if max_tokens is not None and (not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0):
+        return "invalid request payload"
+    messages = payload.get("messages")
+    if messages is not None and not isinstance(messages, list):
+        return "invalid request payload"
+    return None

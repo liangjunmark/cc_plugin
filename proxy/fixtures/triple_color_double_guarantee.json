@@ -1,0 +1,6 @@
+{
+  "name": "triple_color_double_guarantee",
+  "expected_answer": "17",
+  "exact_output_required": true,
+  "prompt": "一个盒子里有红球8个、蓝球7个、绿球6个。随机摸球（不放回），至少要摸多少个，才能保证红球、蓝球、绿球三种颜色都至少各有2个？只输出最终答案。"
+}

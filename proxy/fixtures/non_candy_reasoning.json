@@ -1,6 +1,6 @@
 {
   "name": "non_candy_reasoning",
-  "expected_answer": "8",
+  "expected_answer": "6",
   "exact_output_required": false,
   "prompt": "如果一个数先加 3 再减 1 后得到 8，那么原数是多少？请给出简短答案。"
 }

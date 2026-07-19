@@ -1,0 +1,9 @@
+{
+  "name": "non_candy_exact_output_suite",
+  "fixtures": [
+    "digit_swap_sum.json",
+    "modulo_minus_one.json",
+    "door_toggle_100.json",
+    "triple_color_double_guarantee.json"
+  ]
+}

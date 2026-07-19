@@ -46,12 +46,53 @@ enabled = false
 max_input_system_chars = 8000
 target_system_chars = 2000
 
+[rewrite.premise_binding_guardrail]
+enabled = true
+
 [classification]
 enabled = true
 min_chars = 120
 min_line_breaks = 2
 reasoning_keyword_patterns = ["最少", "minimum"]
 output_constraint_patterns = ["只输出", "only output"]
-code_marker_patterns = ["repo", "shell"]
-rewrite_score_threshold = 4
+premise_control_patterns = ["手感", "靠手感", "touch", "distinguishable by touch", "区分形状"]
+code_marker_patterns = ["repo", "shell", "patch", "edit", "modify", "file", "python", "code", "function", "implement", "algorithm", "script", "\\.py\\b"]
+rewrite_score_threshold = 3
 normalize_only_score_threshold = 2
+
+[phase2]
+enabled = false
+trigger_on_routes = ["rewrite"]
+sample_count = 2
+max_adjudication_calls = 1
+max_parallelism = 2
+total_timeout_seconds = 180.0
+# The minimal phase-2 implementation only supports strict JSON candidates.
+require_json_candidates = true
+candidate_roles = ["constraint_reasoner", "counterexample_reasoner"]
+max_candidate_output_tokens = 512
+max_total_upstream_calls = 4
+# The minimal phase-2 implementation always falls back to phase 1 on failure.
+fallback_to_phase1_on_failure = true
+cost_budget_multiplier = 2.0
+allow_streaming_requests = false
+
+[phase2b]
+enabled = false
+trigger_on_routes = ["rewrite"]
+max_branch_count = 3
+branch_families = ["premise_first", "quota_first", "counterexample_first"]
+enable_assumption_audit = true
+enable_worst_case_attack = true
+enable_ledger_checks = true
+max_total_upstream_calls = 13
+total_timeout_seconds = 300.0
+allow_tiebreak_round = true
+require_exact_output_requests = true
+
+[phase2b.boundary_verifier]
+enabled = false
+require_xfyun_upstream = true
+lower_bound = 20
+upper_bound = 21
+trigger_markers = ["黑色的袋子", "手感可以分辨", "苹果味", "桃子味", "西瓜味", "圆形 7 9 8", "五角星形 7 6 4"]

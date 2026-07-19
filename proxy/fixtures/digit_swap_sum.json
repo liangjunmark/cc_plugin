@@ -1,0 +1,6 @@
+{
+  "name": "digit_swap_sum",
+  "expected_answer": "47",
+  "exact_output_required": true,
+  "prompt": "一个两位数，交换十位和个位后得到的新数比原数大 27，并且原数的两个数字之和是 11。原数是多少？只输出最终答案。"
+}
