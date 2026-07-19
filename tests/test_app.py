@@ -522,6 +522,36 @@ def test_messages_phase2b_internal_exact_output_normalization_allows_raw_candy_p
     assert transport.calls == []
 
 
+def test_request_kind_detects_title_generation_prompt() -> None:
+    from proxy.app import _request_kind
+
+    kind = _request_kind(
+        {
+            "system": "Generate a concise, sentence-case title (3-7 words) for this conversation.",
+            "messages": [{"role": "user", "content": "<session>在一个黑色的袋子里...</session>"}],
+        }
+    )
+
+    assert kind == "title_generation"
+
+
+def test_request_kind_defaults_to_user_request_for_candy_prompt() -> None:
+    from proxy.app import _request_kind
+
+    kind = _request_kind(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状。",
+                }
+            ]
+        }
+    )
+
+    assert kind == "user_request"
+
+
 def test_messages_auto_route_still_uses_phase2_for_eligible_non_streamed_requests(config, monkeypatch) -> None:
     from proxy.app import create_app
     from proxy.schemas import AggregationDecision, Phase2ExecutionResult

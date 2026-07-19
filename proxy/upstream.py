@@ -197,6 +197,8 @@ class UpstreamTransport:
     def _record(self, context: RequestContext, name: str, payload: dict[str, Any]) -> None:
         if self.recorder is None:
             return
+        if context.metadata:
+            self.recorder.write_artifact(context, "metadata", context.metadata)
         self.recorder.write_artifact(context, name, payload)
 
 

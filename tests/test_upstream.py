@@ -69,6 +69,31 @@ async def test_send_with_retry_retries_retryable_status_once(config: object, tmp
 
 
 @pytest.mark.asyncio
+async def test_send_with_retry_records_request_metadata(config: object, tmp_path: Path) -> None:
+    async def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        transport = UpstreamTransport(client, config, Recorder(tmp_path, config))
+        result = await transport.send_with_retry(
+            context=RequestContext(
+                request_id="req-meta",
+                attempt=1,
+                log_dir=Path("req-meta"),
+                metadata={"request_kind": "title_generation"},
+            ),
+            headers={},
+            body={"model": "test"},
+            replay_safe=True,
+            stream=False,
+        )
+
+    assert result.status_code == 200
+    metadata = json.loads((tmp_path / "req-meta" / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata == {"request_kind": "title_generation"}
+
+
+@pytest.mark.asyncio
 async def test_send_with_retry_does_not_retry_when_not_replay_safe(config: object, tmp_path: Path) -> None:
     calls = 0
 

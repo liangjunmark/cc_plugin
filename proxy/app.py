@@ -163,6 +163,7 @@ def create_app(
             request_id=request_id,
             attempt=1,
             log_dir=Path(request_id),
+            metadata={"request_kind": _request_kind(payload)},
         )
         upstream = await state["transport"].send_with_retry(
             context=context,
@@ -200,6 +201,32 @@ def create_app(
         return JSONResponse(status_code=status_code, content=parsed)
 
     return app
+
+
+def _request_kind(payload: dict[str, Any]) -> str:
+    system = payload.get("system", "")
+    if isinstance(system, list):
+        system_text = "\n".join(
+            text
+            for item in system
+            if isinstance(item, dict)
+            for text in [_flatten_content_block(item)]
+            if text
+        )
+    else:
+        system_text = str(system)
+    lowered = system_text.lower()
+    if "generate a concise, sentence-case title" in lowered or "title field" in lowered:
+        return "title_generation"
+    return "user_request"
+
+
+def _flatten_content_block(item: dict[str, Any]) -> str | None:
+    block_type = item.get("type")
+    if block_type == "text":
+        text = item.get("text")
+        return text if isinstance(text, str) else None
+    return None
 
 
 async def _aiter_upstream_bytes(response: httpx.Response) -> AsyncIterator[bytes]:
