@@ -2,6 +2,41 @@
 
 Local Anthropic-compatible proxy and replay harness for diagnosing third-party reasoning regressions in Claude Code or Codex flows.
 
+## Claude Code CLI
+
+This repository is ready to sit in front of `Claude Code CLI` as a local Anthropic-compatible proxy. It is not a packaged Claude plugin; the integration path is:
+
+1. Start the local proxy.
+2. Point `ANTHROPIC_BASE_URL` at the local proxy.
+3. Keep `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_MODEL` set to the real upstream provider values so the proxy can forward them.
+
+Minimal setup:
+
+```bash
+cp proxy/config.claude-code.toml.example /tmp/cc-proxy.toml
+# edit /tmp/cc-proxy.toml and set upstream.base_url
+export CC_PROXY_CONFIG=/tmp/cc-proxy.toml
+./scripts/start-claude-code-proxy.sh
+```
+
+In the shell where you launch `Claude Code CLI`:
+
+```bash
+eval "$(./scripts/claude-code-env.sh 127.0.0.1 8787 /tmp/cc-proxy.toml)"
+```
+
+That sets:
+
+- `CC_PROXY_CONFIG` for the local proxy process
+- `ANTHROPIC_BASE_URL=http://127.0.0.1:8787` for Claude Code CLI
+- passthrough `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_MODEL` exports for the upstream provider
+
+Current validated uplift is intentionally narrow:
+
+- ordinary Claude Code CLI traffic can pass through the proxy,
+- validated reasoning uplift currently targets narrow non-streamed exact-output prompt families,
+- the most stable gains so far are the candy boundary family and guarantee-counting family handled by `phase2b`.
+
 ## Start
 
 By default the factory loads `proxy/config.toml.example`. Override it with `CC_PROXY_CONFIG` if you want a local copy.
