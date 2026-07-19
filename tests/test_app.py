@@ -522,6 +522,92 @@ def test_messages_phase2b_internal_exact_output_normalization_allows_raw_candy_p
     assert transport.calls == []
 
 
+def test_messages_phase2b_extracts_latest_user_problem_from_claude_code_wrapped_request(
+    config, monkeypatch
+) -> None:
+    from proxy.app import create_app
+    from proxy.schemas import Phase2bBranchDecision, Phase2bExecutionResult
+
+    phase2b_config = config.model_copy(deep=True)
+    phase2b_config.phase2b.enabled = True
+    phase2b_config.upstream.base_url = "https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic"
+    phase2b_config.phase2b.boundary_verifier.enabled = True
+    phase2b_config.phase2b.boundary_verifier.lower_bound = 20
+    phase2b_config.phase2b.boundary_verifier.upper_bound = 21
+    phase2b_config.phase2b.boundary_verifier.trigger_markers = [
+        "黑色的袋子",
+        "手感可以分辨",
+        "苹果味",
+        "桃子味",
+        "西瓜味",
+        "圆形 7 9 8",
+        "五角星形 7 6 4",
+    ]
+    phase2b_bodies: list[dict[str, object]] = []
+
+    async def fake_run_phase2b(**kwargs):
+        phase2b_bodies.append(deepcopy(kwargs["body"]))
+        return Phase2bExecutionResult(
+            "phase2b",
+            UpstreamResult(200, {}, b'{"type":"message","content":[{"type":"text","text":"30"}]}'),
+            [Phase2bBranchDecision("boundary", True, [], "21", "verified")],
+            {"type": "message", "id": "phase2b", "content": [{"type": "text", "text": "21"}]},
+            None,
+        )
+
+    monkeypatch.setattr("proxy.app.run_phase2b", fake_run_phase2b)
+    transport = StubTransport(
+        UpstreamResult(
+            200,
+            {"content-type": "application/json"},
+            b'{"type":"message","content":[{"type":"text","text":"30"}]}',
+        ),
+    )
+
+    wrapped_body = {
+        "model": "m",
+        "max_tokens": 4096,
+        "stream": True,
+        "system": "You are Claude Code. Help with code, functions, tools, and explanations.",
+        "tools": [{"name": "bash", "input_schema": {"type": "object"}}],
+        "messages": [
+            {"role": "assistant", "content": "Prior tool context."},
+            {
+                "role": "user",
+                "content": (
+                    "在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。"
+                    "现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果"
+                    "才能保证手中同时拥有不同形状的苹果味和桃子味的糖？（同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味"
+                    "匹配五角星苹果味糖果都满足要求）\n苹果味 桃子味 西瓜味\n圆形 7 9 8\n五角星形 7 6 4"
+                ),
+            },
+        ],
+    }
+
+    with TestClient(create_app(phase2b_config, transport=transport)) as client:
+        response = client.post("/v1/messages", json=wrapped_body)
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert b'"text":"21"' in response.content
+    assert len(phase2b_bodies) == 1
+    assert phase2b_bodies[0]["stream"] is False
+    assert phase2b_bodies[0]["messages"] == [
+        {
+            "role": "user",
+            "content": (
+                "在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。"
+                "现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果"
+                "才能保证手中同时拥有不同形状的苹果味和桃子味的糖？（同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味"
+                "匹配五角星苹果味糖果都满足要求）\n苹果味 桃子味 西瓜味\n圆形 7 9 8\n五角星形 7 6 4\n只输出最终答案。"
+            ),
+        }
+    ]
+    assert "tools" not in phase2b_bodies[0]
+    assert "system" not in phase2b_bodies[0]
+    assert transport.calls == []
+
+
 def test_request_kind_detects_title_generation_prompt() -> None:
     from proxy.app import _request_kind
 

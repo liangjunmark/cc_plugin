@@ -58,9 +58,23 @@ def prepare_phase2b_body(
     body: dict[str, Any],
     classification: ClassificationResult,
     config: ProxyConfig,
+    request_kind: str = "user_request",
 ) -> dict[str, Any]:
-    request = deepcopy(body)
-    request["stream"] = False
+    latest_user_text = _latest_user_text_any_history(body)
+    if (
+        request_kind == "user_request"
+        and latest_user_text
+        and _is_stable_phase2b_prompt_family(latest_user_text, config)
+    ):
+        request = {
+            "model": body.get("model"),
+            "max_tokens": body.get("max_tokens", 4096),
+            "stream": False,
+            "messages": [{"role": "user", "content": latest_user_text}],
+        }
+    else:
+        request = deepcopy(body)
+        request["stream"] = False
     surface = extract_effective_prompt_surface(request)
     if (
         config.phase2b.require_exact_output_requests
@@ -891,6 +905,22 @@ def _latest_user_text(body: dict[str, Any]) -> str | None:
     if not _is_single_turn_user_request(body):
         return None
     content = body["messages"][0].get("content")
+    return _flatten_text_content(content)
+
+
+def _latest_user_text_any_history(body: dict[str, Any]) -> str | None:
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return None
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        return _flatten_text_content(message.get("content"))
+    return None
+
+
+def _flatten_text_content(content: Any) -> str | None:
     if isinstance(content, str):
         return content
     if not isinstance(content, list):

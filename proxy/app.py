@@ -89,6 +89,7 @@ def create_app(
                 content=anthropic_error(400, validation_error, "invalid_request_error"),
             )
         request_id = request.headers.get("x-request-id", str(uuid4()))
+        request_kind = _request_kind(payload)
         phase_selector = request.headers.get(PHASE_SELECTOR_HEADER, "auto").strip().lower()
         forward_headers = {
             name: value
@@ -108,19 +109,25 @@ def create_app(
             outgoing_body = rewrite_result.body
 
         streamed_request = bool(outgoing_body.get("stream"))
-        phase2b_body = prepare_phase2b_body(outgoing_body, classification, active_config)
+        phase2b_body = prepare_phase2b_body(
+            outgoing_body,
+            classification,
+            active_config,
+            request_kind=request_kind,
+        )
+        phase2b_classification = classify_request(phase2b_body, active_config)
         should_run_phase2b = False
         if phase_selector == "phase2b":
-            should_run_phase2b = is_phase2b_eligible(phase2b_body, classification, active_config)
+            should_run_phase2b = is_phase2b_eligible(phase2b_body, phase2b_classification, active_config)
         elif phase_selector not in {"phase1", "phase2"}:
-            should_run_phase2b = is_phase2b_eligible(phase2b_body, classification, active_config)
+            should_run_phase2b = is_phase2b_eligible(phase2b_body, phase2b_classification, active_config)
 
         if should_run_phase2b:
             phase2b_result = await run_phase2b(
                 transport=state["transport"],
                 headers=forward_headers,
                 body=phase2b_body,
-                classification=classification,
+                classification=phase2b_classification,
                 config=active_config,
                 request_id=request_id,
             )
@@ -163,7 +170,7 @@ def create_app(
             request_id=request_id,
             attempt=1,
             log_dir=Path(request_id),
-            metadata={"request_kind": _request_kind(payload)},
+            metadata={"request_kind": request_kind},
         )
         upstream = await state["transport"].send_with_retry(
             context=context,
