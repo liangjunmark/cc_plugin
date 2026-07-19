@@ -367,6 +367,91 @@ def test_messages_return_phase2b_selected_answer_for_non_streamed_requests(confi
     assert response.json()["content"][0]["text"] == "21"
 
 
+def test_messages_return_phase2b_selected_answer_as_stream_for_streamed_requests(config, monkeypatch) -> None:
+    from proxy.app import create_app
+    from proxy.schemas import Phase2bBranchDecision, Phase2bExecutionResult
+
+    phase2b_config = config.model_copy(deep=True)
+    phase2b_config.phase2b.enabled = True
+    eligibility_bodies: list[dict[str, object]] = []
+    phase2b_bodies: list[dict[str, object]] = []
+
+    def fake_is_phase2b_eligible(body, *_args):
+        eligibility_bodies.append(deepcopy(body))
+        return True
+
+    async def fake_run_phase2b(**kwargs):
+        phase2b_bodies.append(deepcopy(kwargs["body"]))
+        return Phase2bExecutionResult(
+            "phase2b",
+            UpstreamResult(200, {}, b'{"type":"message","content":[{"type":"text","text":"14"}]}'),
+            [Phase2bBranchDecision("b1", True, [], "21", "survived")],
+            {"type": "message", "id": "phase2b", "content": [{"type": "text", "text": "21"}]},
+            None,
+        )
+
+    monkeypatch.setattr("proxy.app.is_phase2b_eligible", fake_is_phase2b_eligible)
+    monkeypatch.setattr("proxy.app.run_phase2b", fake_run_phase2b)
+    with TestClient(create_app(phase2b_config, transport=StubTransport(UpstreamResult(200, {}, b"{}")))) as client:
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "m",
+                "max_tokens": 4096,
+                "stream": True,
+                "messages": [{"role": "user", "content": "最少 只输出"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert b"event: message_start" in response.content
+    assert b"event: content_block_delta" in response.content
+    assert b'"text":"21"' in response.content
+    assert eligibility_bodies[0]["stream"] is False
+    assert phase2b_bodies[0]["stream"] is False
+
+
+def test_messages_return_phase2b_baseline_as_stream_for_streamed_requests(config, monkeypatch) -> None:
+    from proxy.app import create_app
+    from proxy.schemas import Phase2bBranchDecision, Phase2bExecutionResult
+
+    phase2b_config = config.model_copy(deep=True)
+    phase2b_config.phase2b.enabled = True
+    monkeypatch.setattr("proxy.app.is_phase2b_eligible", lambda *_: True)
+
+    async def fake_run_phase2b(**kwargs):
+        return Phase2bExecutionResult(
+            "phase2b",
+            UpstreamResult(
+                200,
+                {"content-type": "application/json"},
+                b'{"type":"message","id":"baseline","content":[{"type":"text","text":"21"}]}',
+            ),
+            [Phase2bBranchDecision("b1", False, ["boundary_conflict"], None, "fallback")],
+            None,
+            "fallback_to_baseline",
+        )
+
+    monkeypatch.setattr("proxy.app.run_phase2b", fake_run_phase2b)
+    with TestClient(create_app(phase2b_config, transport=StubTransport(UpstreamResult(200, {}, b"{}")))) as client:
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "m",
+                "max_tokens": 4096,
+                "stream": True,
+                "messages": [{"role": "user", "content": "最少 只输出"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert b"event: message_start" in response.content
+    assert b'"id":"baseline"' in response.content
+    assert b'"text":"21"' in response.content
+
+
 def test_messages_auto_route_still_uses_phase2_for_eligible_non_streamed_requests(config, monkeypatch) -> None:
     from proxy.app import create_app
     from proxy.schemas import AggregationDecision, Phase2ExecutionResult

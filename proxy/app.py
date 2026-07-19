@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from contextlib import asynccontextmanager
 import json
 import os
@@ -107,22 +108,29 @@ def create_app(
             )
             outgoing_body = rewrite_result.body
 
+        streamed_request = bool(outgoing_body.get("stream"))
+        phase2b_body = outgoing_body if not streamed_request else _non_stream_copy(outgoing_body)
         should_run_phase2b = False
-        if not bool(outgoing_body.get("stream")):
-            if phase_selector == "phase2b":
-                should_run_phase2b = is_phase2b_eligible(outgoing_body, classification, active_config)
-            elif phase_selector not in {"phase1", "phase2"}:
-                should_run_phase2b = is_phase2b_eligible(outgoing_body, classification, active_config)
+        if phase_selector == "phase2b":
+            should_run_phase2b = is_phase2b_eligible(phase2b_body, classification, active_config)
+        elif phase_selector not in {"phase1", "phase2"}:
+            should_run_phase2b = is_phase2b_eligible(phase2b_body, classification, active_config)
 
         if should_run_phase2b:
             phase2b_result = await run_phase2b(
                 transport=state["transport"],
                 headers=forward_headers,
-                body=outgoing_body,
+                body=phase2b_body,
                 classification=classification,
                 config=active_config,
                 request_id=request_id,
             )
+            if streamed_request:
+                if phase2b_result.downstream_payload is not None:
+                    return _stream_message_response(phase2b_result.downstream_payload)
+                baseline_payload = _successful_message_payload(phase2b_result.baseline_upstream)
+                if baseline_payload is not None:
+                    return _stream_message_response(baseline_payload)
             if phase2b_result.downstream_payload is not None:
                 return JSONResponse(status_code=200, content=phase2b_result.downstream_payload)
             status_code, content = _parse_upstream_json(phase2b_result.baseline_upstream, normalize_error=True)
@@ -201,6 +209,95 @@ async def _aiter_upstream_bytes(response: httpx.Response) -> AsyncIterator[bytes
             yield chunk
     finally:
         await response.aclose()
+
+
+async def _aiter_message_sse(payload: dict[str, Any]) -> AsyncIterator[bytes]:
+    message = _sse_message_envelope(payload)
+    yield _encode_sse_event("message_start", {"type": "message_start", "message": message})
+    for index, block in enumerate(payload.get("content", [])):
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "text":
+            yield _encode_sse_event(
+                "content_block_start",
+                {"type": "content_block_start", "index": index, "content_block": {"type": "text", "text": ""}},
+            )
+            yield _encode_sse_event(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": {"type": "text_delta", "text": block.get("text", "")},
+                },
+            )
+        else:
+            yield _encode_sse_event(
+                "content_block_start",
+                {"type": "content_block_start", "index": index, "content_block": block},
+            )
+        yield _encode_sse_event("content_block_stop", {"type": "content_block_stop", "index": index})
+    yield _encode_sse_event(
+        "message_delta",
+        {
+            "type": "message_delta",
+            "delta": {
+                "stop_reason": payload.get("stop_reason", "end_turn"),
+                "stop_sequence": payload.get("stop_sequence"),
+            },
+            "usage": {"output_tokens": _usage_output_tokens(payload)},
+        },
+    )
+    yield _encode_sse_event("message_stop", {"type": "message_stop"})
+
+
+def _stream_message_response(payload: dict[str, Any]) -> StreamingResponse:
+    return StreamingResponse(_aiter_message_sse(payload), status_code=200, media_type="text/event-stream")
+
+
+def _successful_message_payload(upstream: UpstreamResult) -> dict[str, Any] | None:
+    status_code, payload = _parse_upstream_json(upstream, normalize_error=True)
+    if status_code == 200 and _is_anthropic_message(payload):
+        return payload
+    return None
+
+
+def _sse_message_envelope(payload: dict[str, Any]) -> dict[str, Any]:
+    usage = payload.get("usage")
+    output_tokens = 0
+    input_tokens = 0
+    if isinstance(usage, dict):
+        if isinstance(usage.get("output_tokens"), int):
+            output_tokens = usage["output_tokens"]
+        if isinstance(usage.get("input_tokens"), int):
+            input_tokens = usage["input_tokens"]
+    return {
+        "id": payload.get("id", "msg_phase2b"),
+        "type": "message",
+        "role": payload.get("role", "assistant"),
+        "model": payload.get("model", "phase2b-proxy"),
+        "content": [],
+        "stop_reason": None,
+        "stop_sequence": None,
+        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+    }
+
+
+def _usage_output_tokens(payload: dict[str, Any]) -> int:
+    usage = payload.get("usage")
+    if isinstance(usage, dict) and isinstance(usage.get("output_tokens"), int):
+        return usage["output_tokens"]
+    return 0
+
+
+def _encode_sse_event(event: str, data: dict[str, Any]) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n".encode("utf-8")
+
+
+def _non_stream_copy(body: dict[str, Any]) -> dict[str, Any]:
+    copied = deepcopy(body)
+    copied["stream"] = False
+    return copied
 
 
 def _stream_media_type(headers: dict[str, str]) -> str:

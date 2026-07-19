@@ -34,7 +34,8 @@ That sets:
 Current validated uplift is intentionally narrow:
 
 - ordinary Claude Code CLI traffic can pass through the proxy,
-- validated reasoning uplift currently targets narrow non-streamed exact-output prompt families,
+- validated reasoning uplift currently targets narrow exact-output prompt families,
+- eligible `phase2b` Claude Code CLI `stream=true` requests now use an internal non-stream solve plus synthesized Anthropic SSE bridge,
 - the most stable gains so far are the candy boundary family and guarantee-counting family handled by `phase2b`.
 
 ## Start
@@ -102,6 +103,7 @@ Phase 2b is a narrow experimental path for single-turn exact-output reasoning pr
 - It keeps one retained phase-1 baseline.
 - It runs branch generation plus attack rounds before the final answer.
 - It is intentionally high-cost in the first implementation.
+- For eligible Claude Code CLI streamed requests, the proxy runs the `phase2b` solve on an internal `stream=false` copy and emits a synthetic Anthropic SSE success stream downstream.
 - The first success target is the candy fixture reaching exact-match `21` in repeated runs.
 
 ### Acceptance Batch
