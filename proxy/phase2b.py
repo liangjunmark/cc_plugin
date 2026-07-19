@@ -24,6 +24,7 @@ BRANCH_PROMPTS = {
 BASELINE_FAST_PATH_TRUSTED_BRANCHES = frozenset({"quota_first", "counterexample_first"})
 XFYUN_HOST_MARKER = "xf-yun.com"
 COUNTING_GUARANTEE_LABEL_SUFFIXES = ("球", "味", "形", "门", "人", "枚", "瓶", "块", "张", "颗", "份", "只", "件", "本", "位", "扇")
+SYSTEM_REMINDER_BLOCK_RE = re.compile(r"<system-reminder\b[^>]*>.*?</system-reminder>", re.IGNORECASE | re.DOTALL)
 
 
 def is_phase2b_eligible(
@@ -922,7 +923,7 @@ def _latest_user_text_any_history(body: dict[str, Any]) -> str | None:
 
 def _flatten_text_content(content: Any) -> str | None:
     if isinstance(content, str):
-        return content
+        return _normalize_user_text(content)
     if not isinstance(content, list):
         return None
     parts: list[str] = []
@@ -930,7 +931,15 @@ def _flatten_text_content(content: Any) -> str | None:
         if not isinstance(item, dict) or item.get("type") not in (None, "text"):
             return None
         parts.append(str(item.get("text", "")))
-    return "\n".join(part for part in parts if part).strip()
+    return _normalize_user_text("\n".join(part for part in parts if part))
+
+
+def _normalize_user_text(text: str) -> str | None:
+    stripped = SYSTEM_REMINDER_BLOCK_RE.sub("", text).strip()
+    if stripped:
+        return stripped
+    original = text.strip()
+    return original or None
 
 
 def _append_system_text(system: Any, suffix: str) -> Any:
