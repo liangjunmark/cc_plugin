@@ -199,11 +199,24 @@ async def run_phase2b(
                 return _error_result(decisions, "baseline_failed")
             baseline = baseline_result
 
-            counting_payload = _try_counting_guarantee_fast_path(classification.effective_prompt_surface)
-            if counting_payload is not None:
-                return Phase2bExecutionResult("phase2b", baseline, decisions, counting_payload, None)
+            counting_result = _try_counting_guarantee_fast_path(classification.effective_prompt_surface)
+            if counting_result is not None:
+                counting_answer, counting_summary = counting_result
+                counting_payload = await _finalize_fast_path_payload(
+                    transport=transport,
+                    headers=headers,
+                    body=body,
+                    classification=classification,
+                    request_id=request_id,
+                    call_budget=call_budget,
+                    candidate_answer=counting_answer,
+                    summary_text=counting_summary,
+                    exact_output=exact_output,
+                )
+                if counting_payload is not None:
+                    return Phase2bExecutionResult("phase2b", baseline, decisions, counting_payload, None)
 
-            boundary_payload = await _try_boundary_verifier(
+            boundary_result = await _try_boundary_verifier(
                 transport,
                 headers,
                 body,
@@ -212,8 +225,21 @@ async def run_phase2b(
                 request_id,
                 call_budget,
             )
-            if boundary_payload is not None:
-                return Phase2bExecutionResult("phase2b", baseline, decisions, boundary_payload, None)
+            if boundary_result is not None:
+                boundary_answer, boundary_summary = boundary_result
+                boundary_payload = await _finalize_fast_path_payload(
+                    transport=transport,
+                    headers=headers,
+                    body=body,
+                    classification=classification,
+                    request_id=request_id,
+                    call_budget=call_budget,
+                    candidate_answer=boundary_answer,
+                    summary_text=boundary_summary,
+                    exact_output=exact_output,
+                )
+                if boundary_payload is not None:
+                    return Phase2bExecutionResult("phase2b", baseline, decisions, boundary_payload, None)
 
             ledger = (
                 build_constraint_ledger(classification.effective_prompt_surface)
@@ -460,7 +486,7 @@ async def _try_boundary_verifier(
     )
 
 
-def _try_counting_guarantee_fast_path(surface: str) -> dict[str, Any] | None:
+def _try_counting_guarantee_fast_path(surface: str) -> tuple[str, str] | None:
     required = _extract_required_count(surface)
     if required is None:
         return None
@@ -468,10 +494,11 @@ def _try_counting_guarantee_fast_path(surface: str) -> dict[str, Any] | None:
     if len(counts) < 3:
         return None
     answer = sum(counts) - min(counts) + required
-    return {
-        "type": "message",
-        "content": [{"type": "text", "text": str(answer)}],
-    }
+    summary = (
+        "Worst case: draw all allowable items from the larger categories before the smallest category reaches its quota. "
+        f"That pushes the guarantee threshold to {answer}."
+    )
+    return str(answer), summary
 
 
 def _is_stable_phase2b_prompt_family(surface: str, config: ProxyConfig) -> bool:
@@ -613,6 +640,35 @@ async def _finalize_survivor(
         request_id, "final-compressor", call_budget,
     )
     return _finalized_payload(result, candidate_answer, exact_output)
+
+
+async def _finalize_fast_path_payload(
+    transport: UpstreamTransport,
+    headers: dict[str, str],
+    body: dict[str, Any],
+    classification: ClassificationResult,
+    request_id: str,
+    call_budget: CallBudget,
+    candidate_answer: str,
+    summary_text: str,
+    exact_output: bool,
+) -> dict[str, Any] | None:
+    if exact_output:
+        return {
+            "type": "message",
+            "content": [{"type": "text", "text": candidate_answer}],
+        }
+    return await _finalize_survivor(
+        transport=transport,
+        headers=headers,
+        body=body,
+        classification=classification,
+        request_id=request_id,
+        call_budget=call_budget,
+        survivor_text=summary_text,
+        candidate_answer=candidate_answer,
+        exact_output=False,
+    )
 
 
 async def _send(
@@ -770,7 +826,7 @@ def _boundary_verifier_payload(
     result: UpstreamResult,
     lower_bound: int,
     expected_answer: int,
-) -> dict[str, Any] | None:
+) -> tuple[str, str] | None:
     if not 200 <= result.status_code < 300:
         return None
     try:
@@ -809,9 +865,11 @@ def _boundary_verifier_payload(
         or upper_match.group(1).upper() != "NO"
     ):
         return None
-    canonical_payload = deepcopy(payload)
-    canonical_payload["content"] = [{"type": "text", "text": answer}]
-    return canonical_payload
+    summary = (
+        f"Boundary check: {lower_bound} can still fail in a worst-case construction, but {expected_answer} no longer fails. "
+        f"That makes {expected_answer} the minimum guaranteed answer."
+    )
+    return answer, summary
 
 
 def _is_compact_final_answer(text: str) -> bool:

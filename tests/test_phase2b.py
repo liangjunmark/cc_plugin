@@ -170,6 +170,55 @@ async def test_run_phase2b_uses_configured_boundary_verifier_fast_path_when_it_r
 
 
 @pytest.mark.asyncio
+async def test_run_phase2b_uses_boundary_verifier_fast_path_with_brief_explanation_for_non_exact_output(config) -> None:
+    from proxy.phase2b import run_phase2b
+
+    phase2b_config = _phase2b_config_with_boundary_verifier(config)
+    transport = StubTransport([
+        _message("14"),
+        _message("N20_FAILS: YES\nN21_FAILS: NO\nFINAL_ANSWER: 21"),
+        _message("因为 20 仍可构造失败，而 21 已能保证成功，所以最少取 21 个。"),
+    ])
+    body = {
+        "model": "m",
+        "max_tokens": 4096,
+        "stream": False,
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状（圆形和五角星形，不同的形状靠手感可以分辨）。"
+                    "现已知不同口味的糖和不同形状的数量统计如下表。参赛者需要在活动前决定摸出的糖果数目，那么，最少取出多少个糖果"
+                    "才能保证手中同时拥有不同形状的苹果味和桃子味的糖？请简要说明关键理由，并给出最终答案。"
+                ),
+            }
+        ],
+    }
+    classification = ClassificationResult(
+        "rewrite",
+        5,
+        True,
+        None,
+        "在一个黑色的袋子里 形状靠手感可以分辨 苹果味 桃子味 西瓜味 圆形 7 9 8 五角星形 7 6 4 最少 请简要说明关键理由并给出最终答案",
+    )
+
+    result = await run_phase2b(
+        transport=transport,
+        headers={},
+        body=body,
+        classification=classification,
+        config=phase2b_config,
+        request_id="req-boundary-fast-path-brief",
+    )
+
+    assert result.mode == "phase2b"
+    assert result.downstream_payload["content"] == [
+        {"type": "text", "text": "因为 20 仍可构造失败，而 21 已能保证成功，所以最少取 21 个。"}
+    ]
+    assert len(transport.requests) == 3
+
+
+@pytest.mark.asyncio
 async def test_run_phase2b_uses_counting_guarantee_fast_path_for_category_guarantee_prompt(config) -> None:
     from proxy.phase2b import run_phase2b
 
@@ -191,6 +240,53 @@ async def test_run_phase2b_uses_counting_guarantee_fast_path_for_category_guaran
     assert result.downstream_payload["content"] == [{"type": "text", "text": "17"}]
     assert result.branch_decisions == []
     assert len(transport.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_phase2b_uses_counting_fast_path_with_brief_explanation_for_non_exact_output(config) -> None:
+    from proxy.phase2b import run_phase2b
+
+    phase2b_config = _phase2b_config_without_checks(config)
+    transport = StubTransport([
+        _message("13"),
+        _message("最坏情况是先把另外两类尽量摸完，再补足最少需要的那一类，因此答案是 17。"),
+    ])
+    body = {
+        "model": "m",
+        "max_tokens": 4096,
+        "stream": False,
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "一个盒子里有红球8个、蓝球7个、绿球6个。随机摸球（不放回），至少要摸多少个，才能保证红球、蓝球、绿球三种颜色都至少各有2个？"
+                    "请简要说明关键理由，并给出最终答案。"
+                ),
+            }
+        ],
+    }
+    classification = ClassificationResult(
+        "rewrite",
+        5,
+        True,
+        None,
+        "一个盒子里有红球8个 蓝球7个 绿球6个 至少要摸多少个 才能保证红球 蓝球 绿球三种颜色都至少各有2个 请简要说明关键理由并给出最终答案",
+    )
+
+    result = await run_phase2b(
+        transport=transport,
+        headers={},
+        body=body,
+        classification=classification,
+        config=phase2b_config,
+        request_id="req-counting-fast-path-brief",
+    )
+
+    assert result.mode == "phase2b"
+    assert result.downstream_payload["content"] == [
+        {"type": "text", "text": "最坏情况是先把另外两类尽量摸完，再补足最少需要的那一类，因此答案是 17。"}
+    ]
+    assert len(transport.requests) == 2
 
 
 @pytest.mark.asyncio
